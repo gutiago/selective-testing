@@ -117,10 +117,6 @@ fn find_xcode_derived_data(
 }
 
 impl DataSource for IndexStoreSource {
-    fn name(&self) -> &str {
-        "indexstore"
-    }
-
     fn analyze(
         &self,
         repo_root: &Path,

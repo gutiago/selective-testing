@@ -15,10 +15,6 @@ pub struct DotDSource {
 }
 
 impl DataSource for DotDSource {
-    fn name(&self) -> &str {
-        "dot-d"
-    }
-
     fn analyze(
         &self,
         repo_root: &Path,

@@ -17,19 +17,13 @@ struct FileSymbols {
     path: PathBuf,
     defines: Vec<String>,
     references: Vec<String>,
-    conformances: Vec<String>,
     view_embeddings: Vec<String>,
-    imports: Vec<String>,
     role: FileRole,
 }
 
 pub struct TreeSitterSource;
 
 impl DataSource for TreeSitterSource {
-    fn name(&self) -> &str {
-        "tree-sitter"
-    }
-
     fn analyze(
         &self,
         repo_root: &Path,
@@ -158,8 +152,6 @@ fn parse_swift_file(path: &Path, file_id: &str) -> Result<FileSymbols> {
     defines.dedup();
     references.sort();
     references.dedup();
-    conformances.sort();
-    conformances.dedup();
 
     let role = file_classifier::classify(path, &imports);
 
@@ -168,9 +160,7 @@ fn parse_swift_file(path: &Path, file_id: &str) -> Result<FileSymbols> {
         path: path.to_path_buf(),
         defines,
         references,
-        conformances,
         view_embeddings,
-        imports,
         role,
     })
 }

@@ -29,7 +29,6 @@ impl ResolveResult {
 #[derive(Debug)]
 pub struct AffectedTest {
     pub file_id: String,
-    pub test_kind: TestKind,
     pub test_target: Option<String>,
 }
 
@@ -88,7 +87,6 @@ pub fn resolve_affected_tests(
                 if requested.contains(&node_kind) {
                     by_kind.entry(node_kind).or_default().push(AffectedTest {
                         file_id: node.id.clone(),
-                        test_kind: node_kind,
                         test_target: node.module.clone(),
                     });
                 }

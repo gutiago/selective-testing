@@ -21,8 +21,6 @@ pub struct SourceEdge {
 
 /// Trait for dependency data sources.
 pub trait DataSource {
-    fn name(&self) -> &str;
-
     /// Discover file nodes and edges from this data source.
     fn analyze(
         &self,
