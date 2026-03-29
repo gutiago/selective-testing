@@ -33,6 +33,7 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter)),
         )
         .with_target(false)
+        .with_writer(std::io::stderr)
         .init();
 
     match &cli.command {
@@ -240,7 +241,7 @@ fn cmd_index(
             cached_graph.update_metadata();
             graph::cache::save(&cached_graph, &repo_root)?;
 
-            println!(
+            eprintln!(
                 "Updated {} files, {} edges (incremental)",
                 cached_graph.metadata.file_count,
                 cached_graph.metadata.edge_count,
@@ -314,7 +315,7 @@ fn cmd_index(
     dep_graph.update_metadata();
     graph::cache::save(&dep_graph, &repo_root)?;
 
-    println!(
+    eprintln!(
         "Indexed {} files, {} edges (sources: {:?})",
         dep_graph.metadata.file_count,
         dep_graph.metadata.edge_count,
