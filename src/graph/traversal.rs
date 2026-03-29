@@ -59,10 +59,11 @@ pub fn resolve_affected_tests(
         .flat_map(|k| k.allowed_edges().iter().copied())
         .collect();
 
-    // Snapshot tests requested means we need unlimited depth for view chains.
-    let has_snapshot = requested.contains(&TestKind::Snapshot);
 
     let mut visited: HashSet<NodeIndex> = HashSet::new();
+    // Queue entries: (node, direct_ref_depth)
+    // direct_ref_depth counts only DirectReference hops.
+    // ViewEmbedding hops don't count — they're view tree traversal.
     let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
     let mut by_kind: HashMap<TestKind, Vec<AffectedTest>> = HashMap::new();
 
@@ -74,7 +75,7 @@ pub fn resolve_affected_tests(
     }
 
     // BFS traversal — single pass.
-    while let Some((current, depth)) = queue.pop_front() {
+    while let Some((current, direct_ref_depth)) = queue.pop_front() {
         if !visited.insert(current) {
             continue;
         }
@@ -84,13 +85,7 @@ pub fn resolve_affected_tests(
         // Collect test nodes.
         if node.role.is_test() {
             if let Some(node_kind) = node.role.test_kind() {
-                let within_limit = match node_kind {
-                    // Unit tests: depth 2 (changed → direct dependents → their tests).
-                    TestKind::Unit => depth <= 2,
-                    // Snapshot tests: no depth limit — view hierarchy can be arbitrarily deep.
-                    TestKind::Snapshot => true,
-                };
-                if requested.contains(&node_kind) && within_limit {
+                if requested.contains(&node_kind) {
                     by_kind.entry(node_kind).or_default().push(AffectedTest {
                         file_id: node.id.clone(),
                         test_kind: node_kind,
@@ -102,15 +97,25 @@ pub fn resolve_affected_tests(
             continue;
         }
 
-        // Expand edges.
-        // - Snapshot: no depth limit (visual changes cascade through the view tree).
-        // - Unit only: depth 2 for DirectReference (tests use spies, transitive chains are irrelevant).
-        let at_unit_depth_limit = !has_snapshot && depth >= 2;
+        // Expand edges per type:
+        // - DirectReference: limited to 2 hops (tests use spies, non-view changes don't cascade)
+        // - ViewEmbedding: unlimited (visual changes cascade through the entire view tree)
+        // Only DirectReference increments the depth counter.
+        for edge in graph.graph.edges(current) {
+            let edge_kind = edge.weight().kind;
+            if !allowed_edges.contains(&edge_kind) {
+                continue;
+            }
 
-        if !at_unit_depth_limit {
-            for edge in graph.graph.edges(current) {
-                if allowed_edges.contains(&edge.weight().kind) {
-                    queue.push_back((edge.target(), depth + 1));
+            match edge_kind {
+                EdgeKind::DirectReference => {
+                    if direct_ref_depth < 2 {
+                        queue.push_back((edge.target(), direct_ref_depth + 1));
+                    }
+                }
+                EdgeKind::ViewEmbedding => {
+                    // View embedding doesn't count toward depth — view tree is unlimited.
+                    queue.push_back((edge.target(), direct_ref_depth));
                 }
             }
         }
