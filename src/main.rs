@@ -387,13 +387,7 @@ fn cmd_resolve(
         "Resolution complete"
     );
 
-    // Output results.
-    let formatted = output::format_result(&result, format);
-    if !formatted.is_empty() {
-        println!("{}", formatted);
-    }
-
-    // Optionally modify test plan.
+    // Optionally modify test plan and filter output to match.
     if let Some(plan_path) = test_plan {
         let mut plan = xcode::testplan::read(&plan_path)?;
         let affected_files: Vec<String> = result
@@ -403,8 +397,38 @@ fn cmd_resolve(
             .collect();
         let disabled = xcode::testplan::disable_unaffected_targets(&mut plan, &affected_files);
         xcode::testplan::write(&plan, &plan_path)?;
-        if !disabled.is_empty() {
-            info!(count = disabled.len(), "Disabled unaffected test targets in test plan");
+
+        // Collect enabled target container paths for filtering output.
+        let enabled_targets: Vec<String> = plan
+            .test_targets
+            .iter()
+            .filter(|t| t.enabled != Some(false))
+            .map(|t| {
+                t.target
+                    .container_path
+                    .strip_prefix("container:")
+                    .unwrap_or(&t.target.container_path)
+                    .to_string()
+            })
+            .collect();
+
+        // Filter result to only show files belonging to enabled targets.
+        let filtered = result.filter_by_targets(&enabled_targets);
+
+        let formatted = output::format_result(&filtered, format);
+        if !formatted.is_empty() {
+            println!("{}", formatted);
+        }
+
+        info!(
+            enabled_targets = plan.test_targets.len() - disabled.len(),
+            disabled_targets = disabled.len(),
+            "Test plan updated"
+        );
+    } else {
+        let formatted = output::format_result(&result, format);
+        if !formatted.is_empty() {
+            println!("{}", formatted);
         }
     }
 

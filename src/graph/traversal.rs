@@ -24,6 +24,34 @@ impl ResolveResult {
     pub fn total_count(&self) -> usize {
         self.by_kind.values().map(|v| v.len()).sum()
     }
+
+    /// Filter to only include tests whose file path matches one of the given target paths.
+    pub fn filter_by_targets(&self, target_paths: &[String]) -> ResolveResult {
+        let mut filtered: HashMap<TestKind, Vec<AffectedTest>> = HashMap::new();
+
+        for (&kind, tests) in &self.by_kind {
+            let matching: Vec<AffectedTest> = tests
+                .iter()
+                .filter(|t| {
+                    target_paths
+                        .iter()
+                        .any(|tp| t.file_id.contains(tp))
+                })
+                .map(|t| AffectedTest {
+                    file_id: t.file_id.clone(),
+                    test_target: t.test_target.clone(),
+                })
+                .collect();
+            if !matching.is_empty() {
+                filtered.insert(kind, matching);
+            }
+        }
+
+        ResolveResult {
+            files_visited: self.files_visited,
+            by_kind: filtered,
+        }
+    }
 }
 
 #[derive(Debug)]
