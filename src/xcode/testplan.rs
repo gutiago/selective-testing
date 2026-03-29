@@ -77,21 +77,35 @@ pub fn write(plan: &TestPlan, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Disable test targets that have no affected tests.
+/// Disable test targets that have no affected test files.
+/// Matches affected file paths against each target's container path and name.
 /// Returns the list of target names that were disabled.
 pub fn disable_unaffected_targets(
     plan: &mut TestPlan,
-    affected_target_names: &[String],
+    affected_file_paths: &[String],
 ) -> Vec<String> {
     let mut disabled = Vec::new();
 
     for target in &mut plan.test_targets {
         let target_name = &target.target.name;
-        if !affected_target_names.contains(target_name) {
+        let container = &target.target.container_path;
+
+        // Extract the package path from container (e.g., "container:Packages/Training" → "Packages/Training")
+        let container_path = container
+            .strip_prefix("container:")
+            .unwrap_or(container);
+
+        // A target is affected if any affected file path contains the container path
+        // or matches the target name in its path.
+        let is_affected = affected_file_paths.iter().any(|file_path| {
+            file_path.contains(container_path) || file_path.contains(target_name)
+        });
+
+        if is_affected {
+            target.enabled = Some(true);
+        } else {
             target.enabled = Some(false);
             disabled.push(target_name.clone());
-        } else {
-            target.enabled = Some(true);
         }
     }
 

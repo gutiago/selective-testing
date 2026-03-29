@@ -396,12 +396,12 @@ fn cmd_resolve(
     // Optionally modify test plan.
     if let Some(plan_path) = test_plan {
         let mut plan = xcode::testplan::read(&plan_path)?;
-        let affected_targets: Vec<String> = result
+        let affected_files: Vec<String> = result
             .all_tests()
             .iter()
-            .filter_map(|t| t.test_target.clone())
+            .map(|t| t.file_id.clone())
             .collect();
-        let disabled = xcode::testplan::disable_unaffected_targets(&mut plan, &affected_targets);
+        let disabled = xcode::testplan::disable_unaffected_targets(&mut plan, &affected_files);
         xcode::testplan::write(&plan, &plan_path)?;
         if !disabled.is_empty() {
             info!(count = disabled.len(), "Disabled unaffected test targets in test plan");
