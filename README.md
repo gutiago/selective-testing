@@ -114,6 +114,13 @@ For a branch with 2 changed Swift files, selective-testing identified 6 unit tes
 
 ## Installation
 
+### Homebrew
+
+```bash
+brew tap gutiago/tap
+brew install selective-testing
+```
+
 ### From GitHub Releases
 
 ```bash
