@@ -62,7 +62,7 @@ For a branch with 2 changed Swift files, selective-testing identified 6 unit tes
 ### From GitHub Releases
 
 ```bash
-curl -sL https://github.com/gutiago/selective-testing/releases/download/v0.1.0/selective-testing-darwin-arm64.tar.gz \
+curl -sL https://github.com/gutiago/selective-testing/releases/download/1.0.0/selective-testing-darwin-arm64.tar.gz \
   | tar xz -C /usr/local/bin
 ```
 
@@ -163,7 +163,7 @@ commands:
       - run:
           name: Install selective-testing
           command: |
-            curl -sL https://github.com/gutiago/selective-testing/releases/download/v0.1.0/selective-testing-darwin-arm64.tar.gz \
+            curl -sL https://github.com/gutiago/selective-testing/releases/download/1.0.0/selective-testing-darwin-arm64.tar.gz \
               | tar xz -C /usr/local/bin
 
 jobs:
@@ -194,7 +194,7 @@ jobs:
 ```yaml
 - name: Install selective-testing
   run: |
-    curl -sL https://github.com/gutiago/selective-testing/releases/download/v0.1.0/selective-testing-darwin-arm64.tar.gz \
+    curl -sL https://github.com/gutiago/selective-testing/releases/download/1.0.0/selective-testing-darwin-arm64.tar.gz \
       | tar xz -C /usr/local/bin
 
 - name: Index

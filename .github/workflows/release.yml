@@ -2,17 +2,60 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
-
-permissions:
-  contents: write
+    branches:
+      - master
 
 jobs:
-  build:
-    runs-on: macos-14  # Apple Silicon
+  release:
+    runs-on: macos-14
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest tag
+        id: latest_tag
+        run: |
+          TAG=$(git tag --sort=-v:refname | head -n 1)
+          if [ -z "$TAG" ]; then
+            echo "version=1.0.0" >> "$GITHUB_OUTPUT"
+            echo "first_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$TAG" >> "$GITHUB_OUTPUT"
+            echo "first_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine bump type from commit message
+        id: bump_type
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          if echo "$COMMIT_MSG" | head -1 | grep -iq '^(major)'; then
+            echo "type=major" >> "$GITHUB_OUTPUT"
+          elif echo "$COMMIT_MSG" | head -1 | grep -iq '^(patch)'; then
+            echo "type=patch" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=minor" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump version
+        id: bump
+        run: |
+          if [ "${{ steps.latest_tag.outputs.first_release }}" = "true" ]; then
+            NEW_VERSION="1.0.0"
+          else
+            IFS='.' read -r major minor patch <<< "${{ steps.latest_tag.outputs.version }}"
+            TYPE="${{ steps.bump_type.outputs.type }}"
+            if [ "$TYPE" = "major" ]; then
+              NEW_VERSION="$((major + 1)).0.0"
+            elif [ "$TYPE" = "minor" ]; then
+              NEW_VERSION="${major}.$((minor + 1)).0"
+            else
+              NEW_VERSION="${major}.${minor}.$((patch + 1))"
+            fi
+          fi
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -23,6 +66,11 @@ jobs:
       - name: Build Swift helper
         run: cd swift-helper && swift build --configuration release
 
+      - name: Strip binaries
+        run: |
+          strip target/release/selective-testing
+          strip swift-helper/.build/release/index-helper
+
       - name: Package binaries
         run: |
           mkdir -p dist
@@ -30,7 +78,17 @@ jobs:
           cp swift-helper/.build/release/index-helper dist/
           tar czf selective-testing-darwin-arm64.tar.gz -C dist .
 
-      - name: Create Release
+      - name: Create tag and push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag ${{ steps.bump.outputs.version }}
+          git push origin --tags
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.bump.outputs.version }}
+          name: ${{ steps.bump.outputs.version }}
           files: selective-testing-darwin-arm64.tar.gz
+          generate_release_notes: true
