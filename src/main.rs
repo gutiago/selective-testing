@@ -55,8 +55,9 @@ fn main() -> Result<()> {
             kind,
             format,
             test_plan,
+            dry_run,
         } => {
-            cmd_resolve(&cli, base, kind, *format, test_plan.clone())?;
+            cmd_resolve(&cli, base, kind, *format, test_plan.clone(), *dry_run)?;
         }
         Command::Graph { file, cycles, dot } => {
             cmd_graph(&cli, file.clone(), *cycles, *dot)?;
@@ -74,7 +75,8 @@ fn main() -> Result<()> {
 
 fn resolve_repo_root(cli: &Cli) -> Result<PathBuf> {
     if let Some(ref root) = cli.repo_root {
-        Ok(root.clone())
+        std::fs::canonicalize(root)
+            .with_context(|| format!("Failed to resolve repo root: {}", root.display()))
     } else {
         let cwd = std::env::current_dir().context("Failed to get current directory")?;
         diff::git::find_repo_root(&cwd)
@@ -364,6 +366,7 @@ fn cmd_resolve(
     kinds: &[graph::model::TestKind],
     format: cli::args::OutputFormat,
     test_plan: Option<PathBuf>,
+    dry_run: bool,
 ) -> Result<()> {
     let repo_root = resolve_repo_root(cli)?;
 
@@ -387,7 +390,7 @@ fn cmd_resolve(
         "Resolution complete"
     );
 
-    // Optionally modify test plan and filter output to match.
+    // Optionally filter by test plan targets (and modify the plan unless --dry-run).
     if let Some(plan_path) = test_plan {
         let mut plan = xcode::testplan::read(&plan_path)?;
         let affected_files: Vec<String> = result
@@ -396,19 +399,24 @@ fn cmd_resolve(
             .map(|t| t.file_id.clone())
             .collect();
         let disabled = xcode::testplan::disable_unaffected_targets(&mut plan, &affected_files);
-        xcode::testplan::write(&plan, &plan_path)?;
 
-        // Collect enabled target container paths for filtering output.
-        let enabled_targets: Vec<String> = plan
+        if !dry_run {
+            xcode::testplan::write(&plan, &plan_path)?;
+        }
+
+        // Collect enabled targets as (name, container_path) pairs for filtering and xcodebuild output.
+        let enabled_targets: Vec<(String, String)> = plan
             .test_targets
             .iter()
             .filter(|t| t.enabled != Some(false))
             .map(|t| {
-                t.target
+                let path = t
+                    .target
                     .container_path
                     .strip_prefix("container:")
                     .unwrap_or(&t.target.container_path)
-                    .to_string()
+                    .to_string();
+                (t.target.name.clone(), path)
             })
             .collect();
 
@@ -423,7 +431,8 @@ fn cmd_resolve(
         info!(
             enabled_targets = plan.test_targets.len() - disabled.len(),
             disabled_targets = disabled.len(),
-            "Test plan updated"
+            dry_run = dry_run,
+            "Test plan targets resolved"
         );
     } else {
         let formatted = output::format_result(&result, format);

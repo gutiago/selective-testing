@@ -3,6 +3,10 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+fn is_json_null(v: &serde_json::Value) -> bool {
+    v.is_null()
+}
+
 /// Represents the relevant parts of an .xctestplan JSON file.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,11 +40,11 @@ pub struct TestConfiguration {
 pub struct TestTarget {
     #[serde(default)]
     pub target: TargetRef,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_json_null")]
     pub skipped_tests: serde_json::Value,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_json_null")]
     pub selected_tests: serde_json::Value,
     /// Preserve all other fields.
     #[serde(flatten)]
@@ -70,9 +74,15 @@ pub fn read(path: &Path) -> Result<TestPlan> {
 }
 
 /// Write an .xctestplan file (preserving formatting with pretty-print).
+/// Xcode's format escapes forward slashes in JSON strings (e.g., `\/`),
+/// so we post-process to match.
 pub fn write(plan: &TestPlan, path: &Path) -> Result<()> {
     let content = serde_json::to_string_pretty(plan).context("Failed to serialize test plan")?;
-    std::fs::write(path, content)
+    // Xcode escapes forward slashes in JSON string values.
+    let content = content.replace("/", "\\/");
+    // Add trailing newline to match Xcode's output.
+    let content = content + "\n";
+    std::fs::write(path, &content)
         .with_context(|| format!("Failed to write test plan: {}", path.display()))?;
     Ok(())
 }
@@ -101,9 +111,7 @@ pub fn disable_unaffected_targets(
             file_path.contains(container_path) || file_path.contains(target_name)
         });
 
-        if is_affected {
-            target.enabled = Some(true);
-        } else {
+        if !is_affected {
             target.enabled = Some(false);
             disabled.push(target_name.clone());
         }

@@ -46,27 +46,27 @@ pub fn format_result(result: &ResolveResult, format: OutputFormat) -> String {
         }
 
         OutputFormat::Xcodebuild => {
-            let mut sections = Vec::new();
+            let mut flags = Vec::new();
             for &kind in &kind_order {
                 if let Some(tests) = result.by_kind.get(&kind) {
-                    let flags: Vec<String> = tests
-                        .iter()
-                        .filter_map(|t| {
-                            t.test_target.as_ref().map(|target| {
-                                let class_name = t
-                                    .file_id
-                                    .strip_suffix(".swift")
-                                    .unwrap_or(&t.file_id);
-                                format!("-only-testing:{}/{}", target, class_name)
-                            })
-                        })
-                        .collect();
-                    if !flags.is_empty() {
-                        sections.push(flags.join(" "));
+                    for t in tests {
+                        if let Some(target) = &t.test_target {
+                            let class_name = std::path::Path::new(&t.file_id)
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or(&t.file_id);
+                            let flag = format!("-only-testing:{}/{}", target, class_name);
+                            // Quote flags that contain spaces for shell safety.
+                            if flag.contains(' ') {
+                                flags.push(format!("'{}'", flag));
+                            } else {
+                                flags.push(flag);
+                            }
+                        }
                     }
                 }
             }
-            sections.join(" ")
+            flags.join(" ")
         }
     }
 }

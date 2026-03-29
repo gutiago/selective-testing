@@ -25,21 +25,26 @@ impl ResolveResult {
         self.by_kind.values().map(|v| v.len()).sum()
     }
 
-    /// Filter to only include tests whose file path matches one of the given target paths.
-    pub fn filter_by_targets(&self, target_paths: &[String]) -> ResolveResult {
+    /// Filter to only include tests whose file path matches one of the given targets.
+    /// Each target is a (name, container_path) pair. The target name is assigned to
+    /// `test_target` on matching tests for use in xcodebuild output format.
+    pub fn filter_by_targets(&self, targets: &[(String, String)]) -> ResolveResult {
         let mut filtered: HashMap<TestKind, Vec<AffectedTest>> = HashMap::new();
 
         for (&kind, tests) in &self.by_kind {
             let matching: Vec<AffectedTest> = tests
                 .iter()
-                .filter(|t| {
-                    target_paths
+                .filter_map(|t| {
+                    targets
                         .iter()
-                        .any(|tp| t.file_id.contains(tp))
-                })
-                .map(|t| AffectedTest {
-                    file_id: t.file_id.clone(),
-                    test_target: t.test_target.clone(),
+                        .find(|(name, path)| {
+                            t.file_id.contains(path.as_str())
+                                || t.file_id.contains(name.as_str())
+                        })
+                        .map(|(name, _)| AffectedTest {
+                            file_id: t.file_id.clone(),
+                            test_target: Some(name.clone()),
+                        })
                 })
                 .collect();
             if !matching.is_empty() {
