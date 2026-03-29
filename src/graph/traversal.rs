@@ -114,14 +114,21 @@ pub fn resolve_affected_tests(
 
         let node = &graph.graph[current];
 
-        // Collect test nodes.
+        // Collect test nodes — only actual test classes (name ends with Test/Tests).
         if node.role.is_test() {
-            if let Some(node_kind) = node.role.test_kind() {
-                if requested.contains(&node_kind) {
-                    by_kind.entry(node_kind).or_default().push(AffectedTest {
-                        file_id: node.id.clone(),
-                        test_target: node.module.clone(),
-                    });
+            let stem = std::path::Path::new(&node.id)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            if stem.ends_with("Test") || stem.ends_with("Tests")
+            {
+                if let Some(node_kind) = node.role.test_kind() {
+                    if requested.contains(&node_kind) {
+                        by_kind.entry(node_kind).or_default().push(AffectedTest {
+                            file_id: node.id.clone(),
+                            test_target: node.module.clone(),
+                        });
+                    }
                 }
             }
             // Don't traverse beyond test files — tests use spies, not real deps.
