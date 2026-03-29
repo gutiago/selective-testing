@@ -1,5 +1,7 @@
 # selective-testing
 
+> This is a personal project. It was built for my own use to speed up CI feedback loops on iOS projects I work on.
+
 A high-performance Test Impact Analysis (TIA) tool for Swift/Xcode projects. Given a set of changed files, it identifies the minimal set of affected unit and snapshot tests — so you only run what matters.
 
 ## Problem
@@ -29,12 +31,12 @@ Performs a BFS traversal from each changed file, following outgoing edges to fin
 
 ### Why different rules per test kind
 
-Swift projects that follow dependency injection patterns typically have **unit tests that use stubs, spies, and mocks** to isolate the class under test from its real dependencies. A test for `CartService` injects a `NetworkSpy` instead of the real `NetworkLayer`. This means:
+Swift projects that follow dependency injection patterns typically have **tests that use test doubles (stubs, spies, and mocks)** to isolate the class under test from its real dependencies. Both unit tests and snapshot tests inject fakes — a test for `CartService` injects a `NetworkSpy` instead of the real `NetworkLayer`. This means:
 
 - Changing `NetworkLayer.swift` should **not** trigger `CartServiceTests` — the test never touches `NetworkLayer`, it uses a spy.
 - Changing `CartService.swift` **should** trigger `CartServiceTests` — the test directly exercises this class.
 
-**Snapshot tests are different.** They render real views. If `ProfileAvatar` is embedded inside `ProfileScreen`, changing `ProfileAvatar`'s layout must re-snapshot `ProfileScreen` — because the rendered output literally changes.
+The difference between test kinds is how **views** are handled. Snapshot tests render real SwiftUI views. If `ProfileAvatar` is embedded inside `ProfileScreen`, changing `ProfileAvatar`'s layout must re-snapshot `ProfileScreen` — because the rendered output literally changes. Both kinds use test doubles for non-view dependencies, but snapshot tests must follow the real view hierarchy.
 
 This leads to two distinct traversal strategies:
 
@@ -328,3 +330,7 @@ The principle: **over-select rather than under-select.** Running a few extra tes
 - Git repository
 
 For tree-sitter-only mode (no IndexStoreDB), only Git and the Rust binary are needed.
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
