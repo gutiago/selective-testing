@@ -39,9 +39,9 @@ pub struct TestTarget {
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
-    pub skipped_tests: Vec<serde_json::Value>,
+    pub skipped_tests: serde_json::Value,
     #[serde(default)]
-    pub selected_tests: Vec<serde_json::Value>,
+    pub selected_tests: serde_json::Value,
     /// Preserve all other fields.
     #[serde(flatten)]
     pub other: serde_json::Map<String, serde_json::Value>,
