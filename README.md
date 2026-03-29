@@ -1,7 +1,5 @@
 # selective-testing
 
-> This is a personal project. It was built for my own use to speed up CI feedback loops on iOS projects I work on.
-
 A high-performance Test Impact Analysis (TIA) tool for Swift/Xcode projects. Given a set of changed files, it identifies the minimal set of affected unit and snapshot tests — so you only run what matters.
 
 ## Problem
@@ -55,7 +53,9 @@ Multiple test kinds are resolved in a single BFS pass.
 
 ### Customizing traversal rules
 
-The traversal logic is in [`src/graph/traversal.rs`](src/graph/traversal.rs). To adjust for your project:
+The default traversal rules reflect the patterns used in my own projects — dependency injection with test doubles and SwiftUI view hierarchies. Your codebase may follow different conventions. Here's how to adjust.
+
+The traversal logic is in [`src/graph/traversal.rs`](src/graph/traversal.rs):
 
 **Change the DirectReference depth limit** — modify the `depth < 2` check in the edge expansion:
 
