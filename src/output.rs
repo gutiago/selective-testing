@@ -10,19 +10,23 @@ pub fn format_result(result: &ResolveResult, format: OutputFormat) -> String {
 
     match format {
         OutputFormat::List => {
-            let mut sections = Vec::new();
+            let mut lines = Vec::new();
             for &kind in &kind_order {
                 if let Some(tests) = result.by_kind.get(&kind) {
-                    if !tests.is_empty() {
-                        let mut lines = vec![format!("--- {:?} ({}) ---", kind, tests.len())];
-                        for t in tests {
-                            lines.push(t.file_id.clone());
+                    for t in tests {
+                        let class_name = std::path::Path::new(&t.file_id)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(&t.file_id);
+                        if let Some(target) = &t.test_target {
+                            lines.push(format!("{}/{}", target, class_name));
+                        } else {
+                            lines.push(class_name.to_string());
                         }
-                        sections.push(lines.join("\n"));
                     }
                 }
             }
-            sections.join("\n\n")
+            lines.join("\n")
         }
 
         OutputFormat::Json => {
