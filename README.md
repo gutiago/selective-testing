@@ -30,9 +30,13 @@ Performs a depth-limited BFS traversal from each changed file, following outgoin
 | Test Kind | Edges Followed | Depth Limit | Rationale |
 |-----------|---------------|-------------|-----------|
 | **Unit** | `DirectReference` | 2 | Tests use spies/mocks — transitive chains beyond direct callers are irrelevant |
-| **Snapshot** | `DirectReference` + `ViewEmbedding` | 3 | Visual changes cascade through the view tree, but not beyond |
+| **Snapshot** | `DirectReference` + `ViewEmbedding` | Unlimited | Visual changes cascade through the entire view tree. A 2px change in a leaf view affects every screen that renders it, no matter how deeply nested. |
 
-The traversal stops at test files (their dependencies are fakes, not real implementations) and at the depth limit (prevents fan-out through routers/coordinators that would select hundreds of unrelated tests).
+**Unit test depth limit:** The traversal stops at depth 2 from the changed file (changed → direct dependents → their tests). Since unit tests inject spies/mocks, a change behind a protocol boundary doesn't affect tests that never touch the real implementation. This prevents fan-out through routers and coordinators that would otherwise select hundreds of unrelated tests.
+
+**Snapshot test unlimited depth:** Snapshot tests render real views. If `ProfileAvatar` is embedded in `ProfileHeader`, which is embedded in `ProfileScreen`, which is embedded in `SettingsScreen` — changing `ProfileAvatar` must trigger `SettingsScreenSnapshotTests`. The `ViewEmbedding` edge chain is followed without limit.
+
+The traversal always stops at test files themselves — their dependencies are fakes, not real implementations.
 
 Multiple test kinds are resolved in a single BFS pass.
 

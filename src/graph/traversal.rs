@@ -59,15 +59,8 @@ pub fn resolve_affected_tests(
         .flat_map(|k| k.allowed_edges().iter().copied())
         .collect();
 
-    // Use the largest depth limit across requested kinds.
-    let max_depth: usize = requested
-        .iter()
-        .map(|k| match k {
-            TestKind::Unit => 2,
-            TestKind::Snapshot => 3,
-        })
-        .max()
-        .unwrap_or(2);
+    // Snapshot tests requested means we need unlimited depth for view chains.
+    let has_snapshot = requested.contains(&TestKind::Snapshot);
 
     let mut visited: HashSet<NodeIndex> = HashSet::new();
     let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
@@ -91,12 +84,13 @@ pub fn resolve_affected_tests(
         // Collect test nodes.
         if node.role.is_test() {
             if let Some(node_kind) = node.role.test_kind() {
-                // Check this test's kind is requested AND within its depth limit.
-                let kind_depth_limit = match node_kind {
-                    TestKind::Unit => 2,
-                    TestKind::Snapshot => 3,
+                let within_limit = match node_kind {
+                    // Unit tests: depth 2 (changed → direct dependents → their tests).
+                    TestKind::Unit => depth <= 2,
+                    // Snapshot tests: no depth limit — view hierarchy can be arbitrarily deep.
+                    TestKind::Snapshot => true,
                 };
-                if requested.contains(&node_kind) && depth <= kind_depth_limit {
+                if requested.contains(&node_kind) && within_limit {
                     by_kind.entry(node_kind).or_default().push(AffectedTest {
                         file_id: node.id.clone(),
                         test_kind: node_kind,
@@ -108,14 +102,16 @@ pub fn resolve_affected_tests(
             continue;
         }
 
-        // Check depth limit before expanding.
-        if depth >= max_depth {
-            continue;
-        }
+        // Expand edges.
+        // - Snapshot: no depth limit (visual changes cascade through the view tree).
+        // - Unit only: depth 2 for DirectReference (tests use spies, transitive chains are irrelevant).
+        let at_unit_depth_limit = !has_snapshot && depth >= 2;
 
-        for edge in graph.graph.edges(current) {
-            if allowed_edges.contains(&edge.weight().kind) {
-                queue.push_back((edge.target(), depth + 1));
+        if !at_unit_depth_limit {
+            for edge in graph.graph.edges(current) {
+                if allowed_edges.contains(&edge.weight().kind) {
+                    queue.push_back((edge.target(), depth + 1));
+                }
             }
         }
     }
@@ -235,6 +231,46 @@ mod tests {
         assert_eq!(
             result.by_kind[&TestKind::Snapshot][0].file_id,
             "ProfileScreenSnapshotTests.swift"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_deep_view_hierarchy() {
+        // Icon → Avatar → Header → Profile → Settings → SettingsSnapshotTests
+        // Changing Icon at depth 0 should reach SettingsSnapshotTests at depth 5+.
+        let mut graph = DependencyGraph::new(PathBuf::from("/repo"));
+
+        graph.ensure_node(make_node("Icon.swift", FileRole::Source));
+        graph.ensure_node(make_node("Avatar.swift", FileRole::Source));
+        graph.ensure_node(make_node("Header.swift", FileRole::Source));
+        graph.ensure_node(make_node("ProfileScreen.swift", FileRole::Source));
+        graph.ensure_node(make_node("SettingsScreen.swift", FileRole::Source));
+        graph.ensure_node(make_node("SettingsSnapshotTests.swift", FileRole::SnapshotTest));
+
+        // View embedding chain: Icon → Avatar → Header → Profile → Settings
+        graph.add_edge(&"Icon.swift".into(), &"Avatar.swift".into(), EdgeKind::ViewEmbedding);
+        graph.add_edge(&"Avatar.swift".into(), &"Header.swift".into(), EdgeKind::ViewEmbedding);
+        graph.add_edge(&"Header.swift".into(), &"ProfileScreen.swift".into(), EdgeKind::ViewEmbedding);
+        graph.add_edge(&"ProfileScreen.swift".into(), &"SettingsScreen.swift".into(), EdgeKind::ViewEmbedding);
+        graph.add_edge(
+            &"SettingsScreen.swift".into(),
+            &"SettingsSnapshotTests.swift".into(),
+            EdgeKind::DirectReference,
+        );
+
+        let result = resolve_affected_tests(
+            &graph,
+            &["Icon.swift".to_string()],
+            &[TestKind::Snapshot],
+        );
+        assert_eq!(
+            result.by_kind.get(&TestKind::Snapshot).map(|v| v.len()).unwrap_or(0),
+            1,
+            "Snapshot test should be found regardless of view hierarchy depth"
+        );
+        assert_eq!(
+            result.by_kind[&TestKind::Snapshot][0].file_id,
+            "SettingsSnapshotTests.swift"
         );
     }
 
