@@ -95,7 +95,7 @@ jobs:
 
       - name: Update Homebrew formula
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
         run: |
           SHA=$(shasum -a 256 selective-testing-darwin-arm64.tar.gz | cut -d' ' -f1)
           VERSION=${{ steps.bump.outputs.version }}
