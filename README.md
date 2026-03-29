@@ -29,7 +29,7 @@ Performs a BFS traversal from each changed file, following outgoing edges to fin
 
 ### Why different rules per test kind
 
-In well-structured Swift projects, **unit tests use stubs, spies, and mocks** to isolate the class under test from its real dependencies. A test for `CartService` injects a `NetworkSpy` instead of the real `NetworkLayer`. This means:
+Swift projects that follow dependency injection patterns typically have **unit tests that use stubs, spies, and mocks** to isolate the class under test from its real dependencies. A test for `CartService` injects a `NetworkSpy` instead of the real `NetworkLayer`. This means:
 
 - Changing `NetworkLayer.swift` should **not** trigger `CartServiceTests` — the test never touches `NetworkLayer`, it uses a spy.
 - Changing `CartService.swift` **should** trigger `CartServiceTests` — the test directly exercises this class.
