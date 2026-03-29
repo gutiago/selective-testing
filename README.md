@@ -25,20 +25,69 @@ Uses libgit2 to compute the merge-base diff between your branch and the base bra
 
 ### Phase 3: Resolve
 
-Performs a depth-limited BFS traversal from each changed file, following outgoing edges to find affected test files. Each test kind has its own rules:
+Performs a BFS traversal from each changed file, following outgoing edges to find affected test files. Each test kind has its own traversal rules because of how tests are written.
 
-| Test Kind | Edges Followed | Depth Limit | Rationale |
-|-----------|---------------|-------------|-----------|
-| **Unit** | `DirectReference` | 2 | Tests use spies/mocks — transitive chains beyond direct callers are irrelevant |
-| **Snapshot** | `DirectReference` + `ViewEmbedding` | Unlimited | Visual changes cascade through the entire view tree. A 2px change in a leaf view affects every screen that renders it, no matter how deeply nested. |
+### Why different rules per test kind
 
-**Unit test depth limit:** The traversal stops at depth 2 from the changed file (changed → direct dependents → their tests). Since unit tests inject spies/mocks, a change behind a protocol boundary doesn't affect tests that never touch the real implementation. This prevents fan-out through routers and coordinators that would otherwise select hundreds of unrelated tests.
+In well-structured Swift projects, **unit tests use stubs, spies, and mocks** to isolate the class under test from its real dependencies. A test for `CartService` injects a `NetworkSpy` instead of the real `NetworkLayer`. This means:
 
-**Snapshot test unlimited depth:** Snapshot tests render real views. If `ProfileAvatar` is embedded in `ProfileHeader`, which is embedded in `ProfileScreen`, which is embedded in `SettingsScreen` — changing `ProfileAvatar` must trigger `SettingsScreenSnapshotTests`. The `ViewEmbedding` edge chain is followed without limit.
+- Changing `NetworkLayer.swift` should **not** trigger `CartServiceTests` — the test never touches `NetworkLayer`, it uses a spy.
+- Changing `CartService.swift` **should** trigger `CartServiceTests` — the test directly exercises this class.
 
-The traversal always stops at test files themselves — their dependencies are fakes, not real implementations.
+**Snapshot tests are different.** They render real views. If `ProfileAvatar` is embedded inside `ProfileScreen`, changing `ProfileAvatar`'s layout must re-snapshot `ProfileScreen` — because the rendered output literally changes.
+
+This leads to two distinct traversal strategies:
+
+| Test Kind | Edges Followed | DirectReference Depth | ViewEmbedding Depth | Rationale |
+|-----------|---------------|----------------------|--------------------|-----------|
+| **Unit** | `DirectReference` | 2 hops | N/A | Tests inject spies/stubs — only direct callers matter |
+| **Snapshot** | `DirectReference` + `ViewEmbedding` | 2 hops | Unlimited | Visual changes cascade through the entire view tree |
+
+**DirectReference depth limit (both kinds):** The traversal follows at most 2 `DirectReference` hops from the changed file (changed file → direct dependents → their tests). This prevents fan-out through routers, coordinators, and service layers — since tests at those levels inject spies for the changed dependency, they're unaffected.
+
+**ViewEmbedding unlimited (snapshot only):** `ViewEmbedding` edges represent a view rendering another view inside its `body`. These hops don't count toward the depth limit. A change in a leaf view at depth 10 of the view hierarchy will correctly trigger the root screen's snapshot tests.
+
+The traversal always stops at test files — their dependencies are fakes, not real implementations.
 
 Multiple test kinds are resolved in a single BFS pass.
+
+### Customizing traversal rules
+
+The traversal logic is in [`src/graph/traversal.rs`](src/graph/traversal.rs). To adjust for your project:
+
+**Change the DirectReference depth limit** — modify the `depth < 2` check in the edge expansion:
+
+```rust
+EdgeKind::DirectReference => {
+    if direct_ref_depth < 2 {  // ← change this value
+        queue.push_back((edge.target(), direct_ref_depth + 1));
+    }
+}
+```
+
+Increasing this means tests further from the changed file will be selected. Decreasing to 1 means only tests that directly reference the changed file.
+
+**Add a new test kind** — add a variant to `TestKind` in [`src/graph/model.rs`](src/graph/model.rs) and define which edges it follows:
+
+```rust
+pub enum TestKind {
+    Unit,
+    Snapshot,
+    // YourNewKind,
+}
+
+impl TestKind {
+    pub fn allowed_edges(&self) -> &[EdgeKind] {
+        match self {
+            TestKind::Unit => &[EdgeKind::DirectReference],
+            TestKind::Snapshot => &[EdgeKind::DirectReference, EdgeKind::ViewEmbedding],
+            // TestKind::YourNewKind => &[...],
+        }
+    }
+}
+```
+
+**Change file classification** — modify the path/import heuristics in [`src/swift/file_classifier.rs`](src/swift/file_classifier.rs) to match your project's conventions.
 
 ## Performance
 
