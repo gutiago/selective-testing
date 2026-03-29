@@ -1,0 +1,4 @@
+/target
+.selective-testing/
+.DS_Store
+swift-helper/.build/
