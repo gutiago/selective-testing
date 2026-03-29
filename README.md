@@ -15,7 +15,7 @@ selective-testing operates as a three-phase pipeline: **Index → Diff → Resol
 Builds a file-level dependency graph where nodes are `.swift` files and edges represent "is used by" relationships. The graph is constructed from one of two data sources:
 
 - **IndexStoreDB (primary)** — Queries Xcode's index store via a Swift helper binary. Uses USR (Unified Symbol Resolution) identifiers for exact cross-module symbol matching. A type named `Constants` in module A is distinct from `Constants` in module B.
-- **tree-sitter (fallback)** — Parses Swift source code directly using the tree-sitter grammar. No Xcode build required, but uses name-based matching which can produce false positives across modules.
+- **tree-sitter (fallback)** — Parses Swift source code directly using the tree-sitter grammar. No Xcode build required, but uses name-based matching which can produce false positives across modules. See [Name collision problem](#name-collision-problem-tree-sitter-fallback) below.
 
 The graph is serialized to a MessagePack binary cache (`.selective-testing/graph.bin`). Subsequent runs load the cache and incrementally update only changed files using mtime comparison.
 
@@ -328,6 +328,23 @@ Test files are classified automatically by path and import conventions:
 3. **Compiler .d files** — makefile-format dependency files from DerivedData. Fastest to parse but least precise. Available via `--derived-data` flag.
 
 The principle: **over-select rather than under-select.** Running a few extra tests is far better than missing a broken dependency.
+
+## Name Collision Problem (tree-sitter fallback)
+
+When IndexStoreDB is unavailable, the tool falls back to tree-sitter, which matches types by **name only** — without module scope. This causes significant over-selection in large modular projects.
+
+For example, if multiple SPM packages each define a type called `Constants`, `State`, `ViewModel`, or `Error`, tree-sitter creates edges between all files that reference any of these names, regardless of which module's version they actually use. IndexStoreDB avoids this because each symbol has a USR (Unified Symbol Resolution) that encodes the module — `s:8Training9ConstantsO` is distinct from `s:9Documents9ConstantsO`.
+
+**Real-world impact on a ~7,700 file project (3 files changed):**
+
+| Data Source | Unit Tests Selected | Edges in Graph |
+|-------------|-------------------|----------------|
+| IndexStoreDB | 8 | 38,656 |
+| tree-sitter | 258 | 215,471 |
+
+The tree-sitter fallback selected 32x more tests because common type names created false edges across unrelated modules.
+
+**Recommendation:** Always use IndexStoreDB in CI. The build step runs before testing, so the index store is always fresh. tree-sitter is only useful for local development on a clean checkout where no Xcode build has been done yet.
 
 ## Requirements
 
