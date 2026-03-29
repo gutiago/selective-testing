@@ -27,18 +27,40 @@ pub fn classify_by_path(path: &Path) -> FileRole {
         return FileRole::Source;
     }
 
+    // Test doubles (spies, stubs, mocks, fakes) are support code, not test cases.
+    let file_name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let name_lower = file_name.to_lowercase();
+
+    if name_lower.ends_with("spy")
+        || name_lower.ends_with("stub")
+        || name_lower.ends_with("mock")
+        || name_lower.ends_with("fake")
+        || name_lower.ends_with("fixture")
+        || name_lower.ends_with("fixtures")
+        || name_lower.ends_with("builder")
+        || path_lower.contains("/spy/")
+        || path_lower.contains("/spies/")
+        || path_lower.contains("/stubs/")
+        || path_lower.contains("/mocks/")
+        || path_lower.contains("/fakes/")
+        || path_lower.contains("/fixtures/")
+        || path_lower.contains("/testdoubles/")
+        || path_lower.contains("/supporting/")
+        || path_lower.contains("/helpers/")
+        || path_lower.contains("/common/")
+    {
+        return FileRole::Source;
+    }
+
     // Check if it's in a test directory at all.
     let is_in_test_dir = path_lower.contains("/tests/")
         || path_lower.contains("/test/")
         || path_lower.contains("tests/");
 
     if !is_in_test_dir {
-        let file_name = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let name_lower = file_name.to_lowercase();
-
         if !name_lower.ends_with("test") && !name_lower.ends_with("tests") {
             return FileRole::Source;
         }
