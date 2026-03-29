@@ -181,68 +181,83 @@ fn cmd_index(
                 return Ok(());
             }
 
-            info!(
-                changed = changed.len(),
-                "Incremental update: re-indexing changed files with tree-sitter"
-            );
-
-            // Re-parse only changed files with tree-sitter.
             let changed_paths: Vec<PathBuf> = changed
                 .iter()
                 .map(|id| repo_root.join(id))
                 .filter(|p| p.exists())
                 .collect();
 
-            let ts_source = sources::treesitter::TreeSitterSource;
-            if let Ok((mut new_nodes, new_edges)) = ts_source.analyze(&repo_root, &changed_paths) {
-                // Set current mtimes on updated nodes.
-                for node in &mut new_nodes {
-                    node.mtime = std::fs::metadata(&node.path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs());
-                }
-                let changed_ids: Vec<String> = changed;
-                graph::builder::update_graph_incremental(
-                    &mut cached_graph,
-                    &changed_ids,
-                    new_edges,
-                    new_nodes,
-                );
-            }
-
-            // Add nodes for any new files not yet in the graph.
-            for path in &swift_files {
-                let rel = path
-                    .strip_prefix(&repo_root)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .to_string();
-                if !cached_graph.file_index.contains_key(&rel) {
-                    let role = swift::file_classifier::classify_by_path(path);
-                    let mtime = std::fs::metadata(path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs());
-                    cached_graph.ensure_node(graph::model::FileNode {
-                        id: rel,
-                        path: path.clone(),
-                        role,
-                        module: None,
-                        defined_symbols: vec![],
-                        content_hash: None,
-                        mtime,
-                    });
+            // Try incremental IndexStoreDB for changed files.
+            if let Ok(source) = resolve_indexstore(&repo_root, index_store.clone(), helper_path.clone()) {
+                match source.analyze(&repo_root, &changed_paths) {
+                    Ok((mut new_nodes, new_edges)) => {
+                        info!(changed = changed.len(), "Incremental update (indexstore)");
+                        for node in &mut new_nodes {
+                            node.mtime = std::fs::metadata(&node.path)
+                                .and_then(|m| m.modified())
+                                .ok()
+                                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs());
+                        }
+                        let changed_ids: Vec<String> = changed;
+                        graph::builder::update_graph_incremental(
+                            &mut cached_graph,
+                            &changed_ids,
+                            new_edges,
+                            new_nodes,
+                        );
+                        add_new_file_nodes(&mut cached_graph, &swift_files, &repo_root);
+                        cached_graph.update_metadata();
+                        graph::cache::save(&cached_graph, &repo_root)?;
+                        eprintln!(
+                            "Updated {} files, {} edges (incremental, source: indexstore)",
+                            cached_graph.metadata.file_count,
+                            cached_graph.metadata.edge_count,
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        info!(reason = %e, "Incremental IndexStoreDB failed, trying full IndexStoreDB");
+                        // Fall through — will attempt full index below.
+                    }
                 }
             }
 
+            // Incremental IndexStoreDB failed — try full IndexStoreDB.
+            if let Ok(source) = resolve_indexstore(&repo_root, index_store.clone(), helper_path.clone()) {
+                if let Ok((nodes, edges)) = source.analyze(&repo_root, &swift_files) {
+                    info!("Full IndexStoreDB re-index (incremental failed)");
+                    // Don't use the cache — replace with fresh IndexStoreDB graph.
+                    // Jump to the full index path below.
+                    let mut g = graph::builder::build_graph(&repo_root, nodes, edges)?;
+                    g.metadata.data_sources_used.push("indexstore".to_string());
+                    return finish_full_index(g, &swift_files, &repo_root, derived_data);
+                }
+            }
+
+            // IndexStoreDB fully unavailable — fall back to tree-sitter cache.
+            info!("IndexStoreDB unavailable, using tree-sitter incremental on cache");
+            let ts = sources::treesitter::TreeSitterSource;
+            let (mut new_nodes, new_edges) = ts.analyze(&repo_root, &changed_paths)?;
+            for node in &mut new_nodes {
+                node.mtime = std::fs::metadata(&node.path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs());
+            }
+            let changed_ids: Vec<String> = changed;
+            graph::builder::update_graph_incremental(
+                &mut cached_graph,
+                &changed_ids,
+                new_edges,
+                new_nodes,
+            );
+            add_new_file_nodes(&mut cached_graph, &swift_files, &repo_root);
             cached_graph.update_metadata();
             graph::cache::save(&cached_graph, &repo_root)?;
-
             eprintln!(
-                "Updated {} files, {} edges (incremental)",
+                "Updated {} files, {} edges (incremental, source: tree-sitter)",
                 cached_graph.metadata.file_count,
                 cached_graph.metadata.edge_count,
             );
@@ -251,9 +266,9 @@ fn cmd_index(
     }
 
     // Full index — try IndexStoreDB first, fall back to tree-sitter.
-    let indexstore_result = try_indexstore(&repo_root, &swift_files, index_store, helper_path);
-
-    let mut dep_graph = match indexstore_result {
+    let dep_graph = match resolve_indexstore(&repo_root, index_store, helper_path)
+        .and_then(|source| source.analyze(&repo_root, &swift_files))
+    {
         Ok((nodes, edges)) => {
             let mut g = graph::builder::build_graph(&repo_root, nodes, edges)?;
             g.metadata.data_sources_used.push("indexstore".to_string());
@@ -271,10 +286,20 @@ fn cmd_index(
         }
     };
 
+    finish_full_index(dep_graph, &swift_files, &repo_root, derived_data)
+}
+
+/// Store mtimes, supplement with .d files, save cache.
+fn finish_full_index(
+    mut dep_graph: graph::model::DependencyGraph,
+    swift_files: &[PathBuf],
+    repo_root: &Path,
+    derived_data: Option<PathBuf>,
+) -> Result<()> {
     // Store mtimes for incremental updates.
-    for path in &swift_files {
+    for path in swift_files {
         let rel = path
-            .strip_prefix(&repo_root)
+            .strip_prefix(repo_root)
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
@@ -294,7 +319,7 @@ fn cmd_index(
         let dd_source = sources::dot_d::DotDSource {
             derived_data_path: dd_path,
         };
-        if let Ok((dd_nodes, dd_edges)) = dd_source.analyze(&repo_root, &swift_files) {
+        if let Ok((dd_nodes, dd_edges)) = dd_source.analyze(repo_root, swift_files) {
             for node in dd_nodes {
                 dep_graph.ensure_node(node);
             }
@@ -313,7 +338,7 @@ fn cmd_index(
     }
 
     dep_graph.update_metadata();
-    graph::cache::save(&dep_graph, &repo_root)?;
+    graph::cache::save(&dep_graph, repo_root)?;
 
     eprintln!(
         "Indexed {} files, {} edges (sources: {:?})",
@@ -325,12 +350,44 @@ fn cmd_index(
     Ok(())
 }
 
-fn try_indexstore(
-    repo_root: &Path,
+/// Add nodes for new files not yet in the graph.
+fn add_new_file_nodes(
+    graph: &mut graph::model::DependencyGraph,
     swift_files: &[PathBuf],
+    repo_root: &Path,
+) {
+    for path in swift_files {
+        let rel = path
+            .strip_prefix(repo_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        if !graph.file_index.contains_key(&rel) {
+            let role = swift::file_classifier::classify_by_path(path);
+            let mtime = std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+            graph.ensure_node(graph::model::FileNode {
+                id: rel,
+                path: path.clone(),
+                role,
+                module: None,
+                defined_symbols: vec![],
+                content_hash: None,
+                mtime,
+            });
+        }
+    }
+}
+
+/// Resolve the IndexStoreDB source without running analysis.
+fn resolve_indexstore(
+    repo_root: &Path,
     index_store: Option<PathBuf>,
     helper_path: Option<PathBuf>,
-) -> Result<(Vec<graph::model::FileNode>, Vec<sources::SourceEdge>)> {
+) -> Result<sources::indexstore::IndexStoreSource> {
     // Resolve the helper binary path.
     let helper = helper_path.unwrap_or_else(|| {
         // Look for index-helper next to the selective-testing binary.
@@ -347,18 +404,16 @@ fn try_indexstore(
     }
 
     // Resolve the index store path.
-    let source = if let Some(store_path) = index_store {
-        sources::indexstore::IndexStoreSource {
+    if let Some(store_path) = index_store {
+        Ok(sources::indexstore::IndexStoreSource {
             helper_path: helper,
             store_path,
             db_path: repo_root.join(".selective-testing/indexstore-db"),
-        }
+        })
     } else {
         sources::indexstore::IndexStoreSource::detect(repo_root, helper)
-            .ok_or_else(|| anyhow::anyhow!("Could not auto-detect index store location"))?
-    };
-
-    source.analyze(repo_root, swift_files)
+            .ok_or_else(|| anyhow::anyhow!("Could not auto-detect index store location"))
+    }
 }
 
 fn cmd_resolve(
