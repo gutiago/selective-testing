@@ -102,15 +102,36 @@ jobs:
         run: |
           SHA=$(shasum -a 256 selective-testing-darwin-arm64.tar.gz | cut -d' ' -f1)
           VERSION=${{ steps.bump.outputs.version }}
+          URL="https://github.com/gutiago/selective-testing/releases/download/${VERSION}/selective-testing-darwin-arm64.tar.gz"
 
           git clone https://x-access-token:${GH_TOKEN}@github.com/gutiago/homebrew-tap.git /tmp/homebrew-tap
           cd /tmp/homebrew-tap
 
-          sed -i '' "s|url \".*\"|url \"https://github.com/gutiago/selective-testing/releases/download/${VERSION}/selective-testing-darwin-arm64.tar.gz\"|" Formula/selective-testing.rb
+          # Update latest formula
+          sed -i '' "s|url \".*\"|url \"${URL}\"|" Formula/selective-testing.rb
           sed -i '' "s|sha256 \".*\"|sha256 \"${SHA}\"|" Formula/selective-testing.rb
+
+          # Create versioned formula (e.g., selective-testing@1.0.5.rb)
+          VERSIONED_CLASS="SelectiveTestingAT${VERSION//\./_}"
+          cat > "Formula/selective-testing@${VERSION}.rb" << EOF
+          class ${VERSIONED_CLASS} < Formula
+            desc "Test Impact Analysis for Swift/Xcode projects"
+            homepage "https://github.com/gutiago/selective-testing"
+            url "${URL}"
+            sha256 "${SHA}"
+            license "MIT"
+
+            def install
+              bin.install "selective-testing"
+              bin.install "index-helper"
+            end
+          end
+          EOF
+          # Remove leading whitespace from heredoc
+          sed -i '' 's/^          //' "Formula/selective-testing@${VERSION}.rb"
 
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add Formula/selective-testing.rb
+          git add Formula/
           git diff --cached --quiet || git commit -m "Update selective-testing to ${VERSION}"
           git push
