@@ -331,20 +331,34 @@ The principle: **over-select rather than under-select.** Running a few extra tes
 
 ## Name Collision Problem (tree-sitter fallback)
 
-When IndexStoreDB is unavailable, the tool falls back to tree-sitter, which matches types by **name only** — without module scope. This causes significant over-selection in large modular projects.
+When IndexStoreDB is unavailable, the tool falls back to tree-sitter, which matches types by **name only** — without module scope. This causes over-selection in large modular projects.
 
-For example, if multiple SPM packages each define a type called `Constants`, `State`, `ViewModel`, or `Error`, tree-sitter creates edges between all files that reference any of these names, regardless of which module's version they actually use. IndexStoreDB avoids this because each symbol has a USR (Unified Symbol Resolution) that encodes the module — `s:8Training9ConstantsO` is distinct from `s:9Documents9ConstantsO`.
+The most common offender is `Constants` — a nested enum that many Swift files define locally. In a ~7,700 file project, **355 files** define their own `enum Constants` and **522 files** reference `Constants.something`. tree-sitter can't distinguish between them, so a change to `Avatar.swift` (which defines `Constants` internally) creates false edges to hundreds of unrelated files.
+
+To mitigate this, tree-sitter prefixes nested types with their parent type name. A `Constants` enum inside `struct Avatar` is stored as `Avatar.Constants`, which won't match a bare `Constants` reference in another module. This reduces false edges significantly but doesn't eliminate them entirely — top-level types with common names (like `Avatar` itself) can still collide.
+
+IndexStoreDB avoids this entirely because each symbol has a USR (Unified Symbol Resolution) that encodes the full module path — `s:19DesignSystemSwiftUI6AvatarV9ConstantsO` is distinct from `s:8Training21TrainingInteractorImplC9ConstantsO`.
 
 **Real-world impact on a ~7,700 file project (3 files changed):**
 
 | Data Source | Unit Tests Selected | Edges in Graph |
 |-------------|-------------------|----------------|
-| IndexStoreDB | 8 | 38,656 |
-| tree-sitter | 258 | 215,471 |
+| IndexStoreDB | 4 | 38,656 |
+| tree-sitter (with nested prefixing) | 23 | 163,615 |
+| tree-sitter (without prefixing) | 61 | 215,471 |
 
-The tree-sitter fallback selected 32x more tests because common type names created false edges across unrelated modules.
+**Recommendation:** Always use IndexStoreDB in CI. The build step runs before testing, so the index store is always fresh. tree-sitter is a fallback for local development where no Xcode build has been done yet — expect some over-selection.
 
-**Recommendation:** Always use IndexStoreDB in CI. The build step runs before testing, so the index store is always fresh. tree-sitter is only useful for local development on a clean checkout where no Xcode build has been done yet.
+## Caching
+
+The dependency graph is cached at `.selective-testing/` in the repo root. Cache files are named by data source:
+
+- `graph-indexstore.bin` — built from IndexStoreDB
+- `graph-tree-sitter.bin` — built from tree-sitter fallback
+
+When loading, the tool prefers `indexstore` over `tree-sitter`. This prevents accidentally using a less precise tree-sitter cache when an IndexStoreDB cache is available.
+
+Incremental updates compare file mtimes against the cached graph and only re-parse changed files using tree-sitter (no full IndexStoreDB re-query needed).
 
 ## Requirements
 
