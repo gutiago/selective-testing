@@ -145,6 +145,7 @@ fn parse_swift_file(path: &Path, file_id: &str) -> Result<FileSymbols> {
         &mut imports,
         &mut view_embeddings,
         false, // not inside body
+        None,  // no parent type at top level
     );
 
     // Deduplicate.
@@ -166,6 +167,7 @@ fn parse_swift_file(path: &Path, file_id: &str) -> Result<FileSymbols> {
 }
 
 /// Recursively walk the syntax tree and extract symbols.
+/// `parent_type` tracks the enclosing type for nested type disambiguation.
 fn extract_symbols(
     cursor: &mut tree_sitter::TreeCursor,
     source: &[u8],
@@ -175,6 +177,7 @@ fn extract_symbols(
     imports: &mut Vec<String>,
     view_embeddings: &mut Vec<String>,
     in_view_body: bool,
+    parent_type: Option<&str>,
 ) {
     loop {
         let node = cursor.node();
@@ -182,11 +185,39 @@ fn extract_symbols(
 
         match kind {
             // Type declarations — extract the name child.
+            // Nested types are prefixed with parent to avoid collisions
+            // (e.g., Avatar.Constants vs TrainingInteractorImpl.Constants).
             "class_declaration" | "struct_declaration" | "enum_declaration"
             | "protocol_declaration" => {
                 if let Some(name_node) = node.child_by_field_name("name") {
                     if let Ok(name) = name_node.utf8_text(source) {
-                        defines.push(name.to_string());
+                        if let Some(parent) = parent_type {
+                            // Nested type: define both prefixed and unprefixed for matching.
+                            defines.push(format!("{}.{}", parent, name));
+                        } else {
+                            defines.push(name.to_string());
+                        }
+
+                        // Recurse into this type's body with it as parent context.
+                        if cursor.goto_first_child() {
+                            let owned_name = name.to_string();
+                            extract_symbols(
+                                cursor,
+                                source,
+                                defines,
+                                references,
+                                conformances,
+                                imports,
+                                view_embeddings,
+                                in_view_body,
+                                Some(&owned_name),
+                            );
+                            cursor.goto_parent();
+                        }
+                        if !cursor.goto_next_sibling() {
+                            break;
+                        }
+                        continue;
                     }
                 }
                 // Check for inheritance clause within this declaration.
@@ -250,6 +281,7 @@ fn extract_symbols(
                             imports,
                             view_embeddings,
                             true,
+                            parent_type,
                         );
                         cursor.goto_parent();
                         if !cursor.goto_next_sibling() {
@@ -274,6 +306,7 @@ fn extract_symbols(
                 imports,
                 view_embeddings,
                 in_view_body,
+                parent_type,
             );
             cursor.goto_parent();
         }

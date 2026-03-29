@@ -5,16 +5,23 @@ use std::path::Path;
 use super::model::DependencyGraph;
 
 const CACHE_DIR: &str = ".selective-testing";
-const GRAPH_FILE: &str = "graph.bin";
 
-/// Resolve the cache file path for a given repo root.
-pub fn cache_path(repo_root: &Path) -> std::path::PathBuf {
-    repo_root.join(CACHE_DIR).join(GRAPH_FILE)
+/// Resolve the cache file path for a given repo root and data source.
+pub fn cache_path(repo_root: &Path, source: &str) -> std::path::PathBuf {
+    repo_root
+        .join(CACHE_DIR)
+        .join(format!("graph-{}.bin", source))
 }
 
 /// Save the graph to a MessagePack binary cache file.
 pub fn save(graph: &DependencyGraph, repo_root: &Path) -> Result<()> {
-    let path = cache_path(repo_root);
+    let source = graph
+        .metadata
+        .data_sources_used
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("unknown");
+    let path = cache_path(repo_root, source);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create cache directory: {}", parent.display()))?;
@@ -30,21 +37,25 @@ pub fn save(graph: &DependencyGraph, repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Load the graph from a MessagePack binary cache file.
+/// Load the graph from cache, preferring indexstore over tree-sitter.
 pub fn load(repo_root: &Path) -> Result<Option<DependencyGraph>> {
-    let path = cache_path(repo_root);
-    if !path.exists() {
-        return Ok(None);
+    // Prefer indexstore cache, fall back to tree-sitter.
+    for source in &["indexstore", "tree-sitter"] {
+        let path = cache_path(repo_root, source);
+        if path.exists() {
+            let data = fs::read(&path)
+                .with_context(|| format!("Failed to read cache file: {}", path.display()))?;
+            let graph: DependencyGraph =
+                rmp_serde::from_slice(&data).context("Failed to deserialize graph cache")?;
+            tracing::info!(
+                path = %path.display(),
+                source = source,
+                files = graph.metadata.file_count,
+                edges = graph.metadata.edge_count,
+                "Graph cache loaded"
+            );
+            return Ok(Some(graph));
+        }
     }
-    let data = fs::read(&path)
-        .with_context(|| format!("Failed to read cache file: {}", path.display()))?;
-    let graph: DependencyGraph =
-        rmp_serde::from_slice(&data).context("Failed to deserialize graph cache")?;
-    tracing::info!(
-        path = %path.display(),
-        files = graph.metadata.file_count,
-        edges = graph.metadata.edge_count,
-        "Graph cache loaded"
-    );
-    Ok(Some(graph))
+    Ok(None)
 }
