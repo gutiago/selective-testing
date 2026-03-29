@@ -8,6 +8,7 @@ on:
 jobs:
   release:
     runs-on: macos-14
+    environment: main
     permissions:
       contents: write
     steps:
