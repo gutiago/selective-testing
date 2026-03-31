@@ -111,7 +111,7 @@ fn changed_swift_files_with_merge_base(
     Ok(changed_files)
 }
 
-/// Fetch changed files via `gh api` compare endpoint.
+/// Fetch changed files via GitHub compare API using curl.
 /// Used as a fallback on CI when the local clone is too shallow for merge-base.
 fn changed_swift_files_from_github(repo_root: &Path, base_ref: &str) -> Result<Vec<String>> {
     let remote_output = Command::new("git")
@@ -131,28 +131,45 @@ fn changed_swift_files_from_github(repo_root: &Path, base_ref: &str) -> Result<V
     let head_sha = String::from_utf8_lossy(&head_output.stdout).trim().to_string();
 
     let base = base_ref.strip_prefix("origin/").unwrap_or(base_ref);
+    let url = format!(
+        "https://api.github.com/repos/{}/compare/{}...{}",
+        repo_slug, base, head_sha
+    );
 
-    let output = Command::new("gh")
-        .args([
-            "api",
-            &format!("repos/{}/compare/{}...{}", repo_slug, base, head_sha),
-            "--jq",
-            ".files[].filename",
-        ])
-        .current_dir(repo_root)
+    let mut args = vec![
+        "-sfL".to_string(),
+        "-H".to_string(), "Accept: application/vnd.github+json".to_string(),
+    ];
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        args.push("-H".to_string());
+        args.push(format!("Authorization: Bearer {}", token));
+    }
+    args.push(url);
+
+    let output = Command::new("curl")
+        .args(&args)
         .output()
-        .context("Failed to run gh api compare")?;
+        .context("Failed to run curl for GitHub compare API")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("gh api compare failed: {}", stderr);
+        anyhow::bail!("GitHub compare API request failed: {}", stderr);
     }
 
-    let changed_files: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|f| f.ends_with(".swift"))
-        .map(|f| f.to_string())
-        .collect();
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .context("Failed to parse GitHub compare API response")?;
+
+    let changed_files: Vec<String> = json["files"]
+        .as_array()
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|f| f["filename"].as_str())
+                .filter(|f| f.ends_with(".swift"))
+                .map(|f| f.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
 
     info!(count = changed_files.len(), base = base_ref, "Changed Swift files detected (via GitHub API)");
     Ok(changed_files)
