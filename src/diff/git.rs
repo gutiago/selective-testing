@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result};
 use git2::{DiffOptions, Repository};
@@ -50,11 +51,31 @@ pub fn changed_swift_files(repo_root: &Path, base_ref: &str) -> Result<Vec<Strin
         .peel_to_commit()
         .context("HEAD does not point to a commit")?;
 
-    let merge_base = repo
-        .merge_base(base_commit.id(), head_commit.id())
-        .with_context(|| format!("Failed to find merge-base between {} and HEAD", base_ref))?;
+    let merge_base_oid = match repo.merge_base(base_commit.id(), head_commit.id()) {
+        Ok(oid) => oid,
+        Err(_) if repo.is_shallow() && std::env::var_os("CI").is_some() => {
+            info!("Shallow repository detected on CI, fetching changed files from GitHub API");
+            return changed_swift_files_from_github(repo_root, base_ref);
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!("Failed to find merge-base between {} and HEAD", base_ref)
+            });
+        }
+    };
+
+    changed_swift_files_with_merge_base(&repo, repo_root, base_ref, merge_base_oid)
+
+}
+
+fn changed_swift_files_with_merge_base(
+    repo: &Repository,
+    _repo_root: &Path,
+    base_ref: &str,
+    merge_base_oid: git2::Oid,
+) -> Result<Vec<String>> {
     let merge_base_commit = repo
-        .find_commit(merge_base)
+        .find_commit(merge_base_oid)
         .context("Failed to find merge-base commit")?;
     let merge_base_tree = merge_base_commit
         .tree()
@@ -88,6 +109,68 @@ pub fn changed_swift_files(repo_root: &Path, base_ref: &str) -> Result<Vec<Strin
 
     info!(count = changed_files.len(), base = base_ref, "Changed Swift files detected");
     Ok(changed_files)
+}
+
+/// Fetch changed files via `gh api` compare endpoint.
+/// Used as a fallback on CI when the local clone is too shallow for merge-base.
+fn changed_swift_files_from_github(repo_root: &Path, base_ref: &str) -> Result<Vec<String>> {
+    let remote_output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to get git remote URL")?;
+    let remote_url = String::from_utf8_lossy(&remote_output.stdout).trim().to_string();
+    let repo_slug = parse_github_repo_slug(&remote_url)
+        .context("Failed to parse GitHub owner/repo from remote URL")?;
+
+    let head_output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to get HEAD sha")?;
+    let head_sha = String::from_utf8_lossy(&head_output.stdout).trim().to_string();
+
+    let base = base_ref.strip_prefix("origin/").unwrap_or(base_ref);
+
+    let output = Command::new("gh")
+        .args([
+            "api",
+            &format!("repos/{}/compare/{}...{}", repo_slug, base, head_sha),
+            "--jq",
+            ".files[].filename",
+        ])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to run gh api compare")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("gh api compare failed: {}", stderr);
+    }
+
+    let changed_files: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|f| f.ends_with(".swift"))
+        .map(|f| f.to_string())
+        .collect();
+
+    info!(count = changed_files.len(), base = base_ref, "Changed Swift files detected (via GitHub API)");
+    Ok(changed_files)
+}
+
+/// Extract "owner/repo" from a GitHub remote URL.
+/// Handles SSH (git@github.com:owner/repo.git) and HTTPS (https://github.com/owner/repo.git).
+fn parse_github_repo_slug(url: &str) -> Option<String> {
+    let path = if let Some(rest) = url.strip_prefix("git@github.com:") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("ssh://git@github.com/") {
+        rest
+    } else {
+        return None;
+    };
+    Some(path.trim_end_matches(".git").to_string())
 }
 
 fn should_skip(path: &str) -> bool {
