@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 use petgraph::visit::EdgeRef;
-use tracing::info;
+use tracing::{debug, info};
 
 use cli::args::{Cli, Command};
 use sources::DataSource;
@@ -313,6 +313,38 @@ fn finish_full_index(
         }
     }
 
+    // Supplement with AccessibilityBinding + ViewEmbedding edges when IndexStoreDB is primary.
+    // IndexStoreDB only produces DirectReference edges; a11y extraction and view-body
+    // detection require tree-sitter.
+    if dep_graph.metadata.data_sources_used.contains(&"indexstore".to_string()) {
+        info!("Supplementing IndexStoreDB graph with a11y + view-embedding edges via tree-sitter");
+        let ts_source = sources::treesitter::TreeSitterSource;
+        if let Ok((ts_nodes, ts_edges)) = ts_source.analyze(repo_root, swift_files) {
+            // Patch FileNodes with a11y data (setters, queries, test_methods).
+            for node in ts_nodes {
+                if let Some(&idx) = dep_graph.file_index.get(&node.id) {
+                    dep_graph.graph[idx].a11y_setters = node.a11y_setters;
+                    dep_graph.graph[idx].a11y_queries = node.a11y_queries;
+                    dep_graph.graph[idx].test_methods = node.test_methods;
+                }
+            }
+            // Add AccessibilityBinding and ViewEmbedding edges.
+            // ViewEmbedding edges allow unlimited depth traversal through SwiftUI view
+            // hierarchies — without them, deep view trees hit the depth-2 DirectReference
+            // limit and miss UI tests connected via a11y bindings.
+            for edge in &ts_edges {
+                if (edge.kind == graph::model::EdgeKind::AccessibilityBinding
+                    || edge.kind == graph::model::EdgeKind::ViewEmbedding)
+                    && dep_graph.file_index.contains_key(&edge.from)
+                    && dep_graph.file_index.contains_key(&edge.to)
+                {
+                    dep_graph.add_edge(&edge.from, &edge.to, edge.kind);
+                }
+            }
+            dep_graph.metadata.data_sources_used.push("treesitter-supplement".to_string());
+        }
+    }
+
     // If DerivedData is available, supplement with .d files.
     if let Some(dd_path) = derived_data {
         info!(path = %dd_path.display(), "Supplementing with .d file data");
@@ -377,6 +409,9 @@ fn add_new_file_nodes(
                 defined_symbols: vec![],
                 content_hash: None,
                 mtime,
+                a11y_setters: vec![],
+                a11y_queries: vec![],
+                test_methods: vec![],
             });
         }
     }
@@ -430,11 +465,18 @@ fn cmd_resolve(
     let dep_graph = graph::cache::load(&repo_root)?
         .context("No cached graph found. Run `selective-testing index` first.")?;
 
+    debug!(sources = ?dep_graph.metadata.data_sources_used, "Graph data sources");
+
     // Get changed files.
     let changed_files = diff::git::changed_swift_files(&repo_root, base)?;
     if changed_files.is_empty() {
         info!("No Swift files changed");
         return Ok(());
+    }
+
+    for f in &changed_files {
+        let in_graph = dep_graph.file_index.contains_key(f);
+        debug!(file = %f, in_graph = in_graph, "Changed file");
     }
 
     // Resolve all affected tests in a single pass.
@@ -522,6 +564,13 @@ fn cmd_graph(
                 for edge in dep_graph.graph.edges(idx) {
                     let target = &dep_graph.graph[edge.target()];
                     println!("  → {} ({:?})", target.id, edge.weight().kind);
+                }
+
+                use petgraph::Direction;
+                println!("\nDependencies (files this depends on):");
+                for edge in dep_graph.graph.edges_directed(idx, Direction::Incoming) {
+                    let source = &dep_graph.graph[edge.source()];
+                    println!("  ← {} ({:?})", source.id, edge.weight().kind);
                 }
             }
         } else {

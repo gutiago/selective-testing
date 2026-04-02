@@ -26,7 +26,7 @@ pub fn save(graph: &DependencyGraph, repo_root: &Path) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create cache directory: {}", parent.display()))?;
     }
-    let data = rmp_serde::to_vec(graph).context("Failed to serialize graph")?;
+    let data = rmp_serde::to_vec_named(graph).context("Failed to serialize graph")?;
     fs::write(&path, &data)
         .with_context(|| format!("Failed to write cache file: {}", path.display()))?;
     tracing::info!(

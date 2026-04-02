@@ -17,14 +17,14 @@ pub fn classify_by_path(path: &Path) -> FileRole {
     let path_str = path.to_string_lossy();
     let path_lower = path_str.to_lowercase();
 
-    // UI test paths → treat as Source (not supported).
+    // UI test paths.
     if path_lower.contains("uitest")
         || path_lower.contains("ui_test")
         || path_lower.contains("/uitests/")
         || path_lower.contains("e2etest")
         || path_lower.contains("/e2etests/")
     {
-        return FileRole::Source;
+        return FileRole::UITest;
     }
 
     // Check if it's in a test directory at all.
@@ -106,9 +106,9 @@ mod tests {
     }
 
     #[test]
-    fn test_ui_test_treated_as_source() {
+    fn test_ui_test_classified_as_uitest() {
         let path = PathBuf::from("UITests/CheckoutUITests.swift");
-        assert_eq!(classify_by_path(&path), FileRole::Source);
+        assert_eq!(classify_by_path(&path), FileRole::UITest);
     }
 
     #[test]

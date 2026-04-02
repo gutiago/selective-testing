@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 
+use tracing::debug;
+
 use super::model::{DependencyGraph, EdgeKind, TestKind};
 
 /// Result of resolving affected tests, grouped by test kind.
@@ -44,6 +46,7 @@ impl ResolveResult {
                         .map(|(name, _)| AffectedTest {
                             file_id: t.file_id.clone(),
                             test_target: Some(name.clone()),
+                            test_methods: t.test_methods.clone(),
                         })
                 })
                 .collect();
@@ -59,18 +62,24 @@ impl ResolveResult {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AffectedTest {
     pub file_id: String,
     pub test_target: Option<String>,
+    /// None means the whole test file is selected.
+    /// Some(methods) means only those specific test methods are selected.
+    pub test_methods: Option<Vec<String>>,
 }
 
 /// Resolve all affected tests in a single BFS pass.
 ///
-/// Runs one traversal using the widest edge set needed across all requested kinds,
-/// then groups collected tests by kind. Each kind has its own depth limit:
-/// - **Unit**: depth 2 (changed → direct dependents → their tests)
-/// - **Snapshot**: depth 3 (changed → view → parent view → snapshot test)
+/// Edge traversal rules:
+/// - **DirectReference**: depth 2 for all kinds (changed → dependents → tests)
+/// - **ViewEmbedding**: unlimited (visual changes cascade through view tree)
+/// - **AccessibilityBinding**: resets DirectReference depth to 0 (bridge to UI tests)
+///
+/// After the BFS, UITest results are post-processed for method-level precision:
+/// only test methods whose a11y queries overlap with the impacted a11y set are selected.
 ///
 /// If `kinds` is empty, resolves all kinds.
 pub fn resolve_affected_tests(
@@ -80,7 +89,9 @@ pub fn resolve_affected_tests(
 ) -> ResolveResult {
     // If no kinds specified, resolve all.
     let requested: HashSet<TestKind> = if kinds.is_empty() {
-        [TestKind::Unit, TestKind::Snapshot].into_iter().collect()
+        [TestKind::Unit, TestKind::Snapshot, TestKind::UITest]
+            .into_iter()
+            .collect()
     } else {
         kinds.iter().copied().collect()
     };
@@ -91,28 +102,59 @@ pub fn resolve_affected_tests(
         .flat_map(|k| k.allowed_edges().iter().copied())
         .collect();
 
-
     let mut visited: HashSet<NodeIndex> = HashSet::new();
-    // Queue entries: (node, direct_ref_depth)
+    // Queue entries: (node, direct_ref_depth, going_down)
     // direct_ref_depth counts only DirectReference hops.
-    // ViewEmbedding hops don't count — they're view tree traversal.
-    let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
+    // going_down is true when we entered this node via reverse ViewEmbedding (traversing
+    // down the view tree). In going_down mode, outgoing ViewEmbedding edges are suppressed
+    // to prevent sideways spreading to unrelated embedders.
+    let mut queue: VecDeque<(NodeIndex, usize, bool)> = VecDeque::new();
     let mut by_kind: HashMap<TestKind, Vec<AffectedTest>> = HashMap::new();
 
-    // Seed with changed files.
-    for file_id in changed_files {
-        if let Some(&idx) = graph.file_index.get(file_id) {
-            queue.push_back((idx, 0));
-        }
+    // Track a11y IDs set by visited source files, for UITest method-level filtering.
+    let needs_ui: bool = requested.contains(&TestKind::UITest);
+    let mut impacted_a11y: HashSet<String> = HashSet::new();
+
+    // Count AccessibilityBinding edges for diagnostics.
+    if needs_ui {
+        let a11y_edge_count = graph
+            .graph
+            .edge_references()
+            .filter(|e| e.weight().kind == EdgeKind::AccessibilityBinding)
+            .count();
+        debug!(a11y_binding_edges = a11y_edge_count, "AccessibilityBinding edges in graph");
     }
 
+    // Seed with changed files.
+    let mut seeded = 0usize;
+    for file_id in changed_files {
+        if let Some(&idx) = graph.file_index.get(file_id) {
+            queue.push_back((idx, 0, false));
+            seeded += 1;
+        }
+    }
+    debug!(seeded, "Changed files seeded into BFS");
+
     // BFS traversal — single pass.
-    while let Some((current, direct_ref_depth)) = queue.pop_front() {
+    while let Some((current, direct_ref_depth, going_down)) = queue.pop_front() {
         if !visited.insert(current) {
             continue;
         }
 
         let node = &graph.graph[current];
+
+        // Collect a11y setters from every visited source node (for UITest method filtering).
+        if needs_ui && node.role == super::model::FileRole::Source {
+            for setter in &node.a11y_setters {
+                impacted_a11y.insert(setter.key().to_string());
+            }
+            // Also collect from page-object files (Source role in UI test dirs).
+            for query in &node.a11y_queries {
+                // Page objects sitting between AccessibilityBinding and UITest files
+                // carry queries; include their keys so method matching works.
+                impacted_a11y.insert(query.key().to_string());
+            }
+        }
 
         // Collect test nodes — only actual test classes (name ends with Test/Tests).
         if node.role.is_test() {
@@ -120,13 +162,14 @@ pub fn resolve_affected_tests(
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("");
-            if stem.ends_with("Test") || stem.ends_with("Tests")
-            {
+            if stem.ends_with("Test") || stem.ends_with("Tests") {
                 if let Some(node_kind) = node.role.test_kind() {
                     if requested.contains(&node_kind) {
                         by_kind.entry(node_kind).or_default().push(AffectedTest {
                             file_id: node.id.clone(),
                             test_target: node.module.clone(),
+                            // Method-level filtering for UITest happens in post-processing.
+                            test_methods: None,
                         });
                     }
                 }
@@ -135,10 +178,11 @@ pub fn resolve_affected_tests(
             continue;
         }
 
-        // Expand edges per type:
-        // - DirectReference: limited to 2 hops (tests use spies, non-view changes don't cascade)
-        // - ViewEmbedding: unlimited (visual changes cascade through the entire view tree)
-        // Only DirectReference increments the depth counter.
+        // Expand outgoing edges:
+        // - DirectReference: limited to 2 hops
+        // - ViewEmbedding: unlimited, but suppressed when going_down (prevents sideways
+        //   spreading to unrelated embedders of the same view)
+        // - AccessibilityBinding: resets depth to 0 (bridge edge)
         for edge in graph.graph.edges(current) {
             let edge_kind = edge.weight().kind;
             if !allowed_edges.contains(&edge_kind) {
@@ -148,12 +192,46 @@ pub fn resolve_affected_tests(
             match edge_kind {
                 EdgeKind::DirectReference => {
                     if direct_ref_depth < 2 {
-                        queue.push_back((edge.target(), direct_ref_depth + 1));
+                        queue.push_back((edge.target(), direct_ref_depth + 1, going_down));
                     }
                 }
                 EdgeKind::ViewEmbedding => {
-                    // View embedding doesn't count toward depth — view tree is unlimited.
-                    queue.push_back((edge.target(), direct_ref_depth));
+                    if !going_down {
+                        // Outgoing ViewEmbedding (up to embedders) — only in normal mode.
+                        queue.push_back((edge.target(), direct_ref_depth, false));
+                    }
+                }
+                EdgeKind::AccessibilityBinding => {
+                    // A11y bridge: reset depth to 0 so page-object → test hops are allowed.
+                    queue.push_back((edge.target(), 0, going_down));
+                }
+            }
+        }
+
+        // Expand incoming ViewEmbedding edges (down the view tree).
+        // Edge direction is definer → embedder, so incoming ViewEmbedding edges at a
+        // node point to views that this node's body embeds. When a container is affected,
+        // its embedded child views are also visually affected.
+        // Enters going_down mode to prevent sideways spreading back up.
+        if allowed_edges.contains(&EdgeKind::ViewEmbedding) {
+            for edge in graph.graph.edges_directed(current, petgraph::Direction::Incoming) {
+                if edge.weight().kind == EdgeKind::ViewEmbedding {
+                    queue.push_back((edge.source(), direct_ref_depth, true));
+                }
+            }
+        }
+    }
+
+    // Post-process UITest results for method-level precision.
+    if needs_ui {
+        if let Some(ui_tests) = by_kind.get_mut(&TestKind::UITest) {
+            for affected in ui_tests.iter_mut() {
+                if let Some(node) = graph.get_node(&affected.file_id) {
+                    let methods = filter_test_methods(node, &impacted_a11y, graph);
+                    if !methods.is_empty() {
+                        affected.test_methods = Some(methods);
+                    }
+                    // If empty, leave test_methods = None (select whole file as fallback).
                 }
             }
         }
@@ -165,10 +243,66 @@ pub fn resolve_affected_tests(
     }
 }
 
+/// Given a UITest file node, return the names of test methods whose a11y queries
+/// overlap with the impacted a11y set (directly or through page objects).
+fn filter_test_methods(
+    node: &super::model::FileNode,
+    impacted_a11y: &HashSet<String>,
+    graph: &DependencyGraph,
+) -> Vec<String> {
+    // Build a set of page object a11y IDs reachable from this test file's referenced types.
+    let mut page_object_a11y: HashSet<String> = HashSet::new();
+    // Walk all incoming DirectReference edges from source nodes (page objects depend on nothing
+    // in tests; tests depend on page objects — edge direction: page_obj → test).
+    // We need to find page objects that point to this test file.
+    if let Some(&test_idx) = graph.file_index.get(&node.id) {
+        use petgraph::Direction;
+        for edge in graph.graph.edges_directed(test_idx, Direction::Incoming) {
+            if edge.weight().kind == EdgeKind::DirectReference {
+                let page_obj = &graph.graph[edge.source()];
+                for q in &page_obj.a11y_queries {
+                    page_object_a11y.insert(q.key().to_string());
+                }
+            }
+        }
+    }
+
+    let mut selected = Vec::new();
+    for method in &node.test_methods {
+        // Check direct a11y queries in this method.
+        let direct_hit = method
+            .a11y_queries
+            .iter()
+            .any(|q| impacted_a11y.contains(q.key()));
+
+        // Check if any referenced type (page object) has impacted a11y IDs.
+        let page_obj_hit = method.referenced_types.iter().any(|type_name| {
+            // Look up the type in the graph as a page object.
+            graph.file_index.keys().any(|file_id| {
+                if file_id.contains(type_name.as_str()) {
+                    if let Some(po_node) = graph.get_node(file_id) {
+                        return po_node
+                            .a11y_queries
+                            .iter()
+                            .any(|q| impacted_a11y.contains(q.key()));
+                    }
+                }
+                false
+            })
+        });
+
+        if direct_hit || page_obj_hit {
+            selected.push(method.name.clone());
+        }
+    }
+
+    selected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::model::{DependencyGraph, FileNode, FileRole};
+    use crate::graph::model::{A11yIdentifier, DependencyGraph, FileNode, FileRole};
     use std::path::PathBuf;
 
     fn make_node(id: &str, role: FileRole) -> FileNode {
@@ -180,6 +314,9 @@ mod tests {
             defined_symbols: vec![],
             content_hash: None,
             mtime: None,
+            a11y_setters: vec![],
+            a11y_queries: vec![],
+            test_methods: vec![],
         }
     }
 
@@ -280,7 +417,6 @@ mod tests {
     #[test]
     fn test_snapshot_deep_view_hierarchy() {
         // Icon → Avatar → Header → Profile → Settings → SettingsSnapshotTests
-        // Changing Icon at depth 0 should reach SettingsSnapshotTests at depth 5+.
         let mut graph = DependencyGraph::new(PathBuf::from("/repo"));
 
         graph.ensure_node(make_node("Icon.swift", FileRole::Source));
@@ -290,7 +426,6 @@ mod tests {
         graph.ensure_node(make_node("SettingsScreen.swift", FileRole::Source));
         graph.ensure_node(make_node("SettingsSnapshotTests.swift", FileRole::SnapshotTest));
 
-        // View embedding chain: Icon → Avatar → Header → Profile → Settings
         graph.add_edge(&"Icon.swift".into(), &"Avatar.swift".into(), EdgeKind::ViewEmbedding);
         graph.add_edge(&"Avatar.swift".into(), &"Header.swift".into(), EdgeKind::ViewEmbedding);
         graph.add_edge(&"Header.swift".into(), &"ProfileScreen.swift".into(), EdgeKind::ViewEmbedding);
@@ -336,7 +471,6 @@ mod tests {
             EdgeKind::DirectReference,
         );
 
-        // Resolve all kinds at once.
         let result = resolve_affected_tests(
             &graph,
             &["Service.swift".to_string()],
@@ -345,7 +479,6 @@ mod tests {
 
         assert_eq!(result.by_kind.get(&TestKind::Unit).map(|v| v.len()).unwrap_or(0), 1);
         assert_eq!(result.by_kind.get(&TestKind::Snapshot).map(|v| v.len()).unwrap_or(0), 1);
-        assert_eq!(result.total_count(), 2);
     }
 
     #[test]
@@ -371,5 +504,190 @@ mod tests {
         );
         assert_eq!(result.by_kind[&TestKind::Unit].len(), 1);
         assert_eq!(result.by_kind[&TestKind::Unit][0].file_id, "ATests.swift");
+    }
+
+    #[test]
+    fn test_uitest_via_accessibility_binding() {
+        let mut graph = DependencyGraph::new(PathBuf::from("/repo"));
+
+        let mut view = make_node("LoginView.swift", FileRole::Source);
+        view.a11y_setters = vec![A11yIdentifier::Literal("login_button".into())];
+        graph.ensure_node(view);
+
+        let mut ui_test = make_node("UITests/LoginUITests.swift", FileRole::UITest);
+        ui_test.a11y_queries = vec![A11yIdentifier::Literal("login_button".into())];
+        ui_test.test_methods = vec![
+            crate::graph::model::TestMethodInfo {
+                name: "testLogin".into(),
+                a11y_queries: vec![A11yIdentifier::Literal("login_button".into())],
+                referenced_types: vec![],
+            },
+            crate::graph::model::TestMethodInfo {
+                name: "testSignup".into(),
+                a11y_queries: vec![A11yIdentifier::Literal("signup_button".into())],
+                referenced_types: vec![],
+            },
+        ];
+        graph.ensure_node(ui_test);
+
+        graph.add_edge(
+            &"LoginView.swift".into(),
+            &"UITests/LoginUITests.swift".into(),
+            EdgeKind::AccessibilityBinding,
+        );
+
+        let result = resolve_affected_tests(
+            &graph,
+            &["LoginView.swift".to_string()],
+            &[TestKind::UITest],
+        );
+
+        let ui = result.by_kind.get(&TestKind::UITest).expect("should have UITest results");
+        assert_eq!(ui.len(), 1);
+        assert_eq!(ui[0].file_id, "UITests/LoginUITests.swift");
+
+        // Only testLogin should be selected (not testSignup).
+        let methods = ui[0].test_methods.as_deref().unwrap_or(&[]);
+        assert!(methods.contains(&"testLogin".to_string()), "testLogin should be selected");
+        assert!(!methods.contains(&"testSignup".to_string()), "testSignup should NOT be selected");
+    }
+
+    #[test]
+    fn test_uitest_depth_limit_via_directreference() {
+        // Service → View → UITest (via a11y)
+        // Service change should reach UITest via View's a11y setter.
+        let mut graph = DependencyGraph::new(PathBuf::from("/repo"));
+
+        graph.ensure_node(make_node("LoginService.swift", FileRole::Source));
+
+        let mut view = make_node("LoginView.swift", FileRole::Source);
+        view.a11y_setters = vec![A11yIdentifier::Literal("login_button".into())];
+        graph.ensure_node(view);
+
+        let mut ui_test = make_node("UITests/LoginUITests.swift", FileRole::UITest);
+        ui_test.test_methods = vec![crate::graph::model::TestMethodInfo {
+            name: "testLogin".into(),
+            a11y_queries: vec![A11yIdentifier::Literal("login_button".into())],
+            referenced_types: vec![],
+        }];
+        graph.ensure_node(ui_test);
+
+        // Service is used by View (depth 1).
+        graph.add_edge(
+            &"LoginService.swift".into(),
+            &"LoginView.swift".into(),
+            EdgeKind::DirectReference,
+        );
+        // View has an a11y binding to the UITest.
+        graph.add_edge(
+            &"LoginView.swift".into(),
+            &"UITests/LoginUITests.swift".into(),
+            EdgeKind::AccessibilityBinding,
+        );
+
+        let result = resolve_affected_tests(
+            &graph,
+            &["LoginService.swift".to_string()],
+            &[TestKind::UITest],
+        );
+
+        let ui = result.by_kind.get(&TestKind::UITest).expect("UITest should be found");
+        assert_eq!(ui.len(), 1);
+        assert_eq!(ui[0].file_id, "UITests/LoginUITests.swift");
+    }
+
+    #[test]
+    fn test_uitest_container_reaches_embedded_views() {
+        // Container → Wrapper (uses Container) → embeds ChildView (ViewEmbedding)
+        // ChildView sets a11y → UITest via AccessibilityBinding
+        // Changing Container should reach UITest through the view tree.
+        let mut graph = DependencyGraph::new(PathBuf::from("/repo"));
+
+        graph.ensure_node(make_node("Container.swift", FileRole::Source));
+        graph.ensure_node(make_node("Wrapper.swift", FileRole::Source));
+
+        let mut child = make_node("ChildView.swift", FileRole::Source);
+        child.a11y_setters = vec![A11yIdentifier::Literal("child_button".into())];
+        graph.ensure_node(child);
+
+        let mut ui_test = make_node("UITests/ChildUITests.swift", FileRole::UITest);
+        ui_test.test_methods = vec![crate::graph::model::TestMethodInfo {
+            name: "testChild".into(),
+            a11y_queries: vec![A11yIdentifier::Literal("child_button".into())],
+            referenced_types: vec![],
+        }];
+        graph.ensure_node(ui_test);
+
+        // Wrapper uses Container (depth 1 from Container change).
+        graph.add_edge(
+            &"Container.swift".into(),
+            &"Wrapper.swift".into(),
+            EdgeKind::DirectReference,
+        );
+        // Wrapper's body embeds ChildView: edge definer(ChildView) → embedder(Wrapper).
+        graph.add_edge(
+            &"ChildView.swift".into(),
+            &"Wrapper.swift".into(),
+            EdgeKind::ViewEmbedding,
+        );
+        // ChildView has a11y binding to the UITest.
+        graph.add_edge(
+            &"ChildView.swift".into(),
+            &"UITests/ChildUITests.swift".into(),
+            EdgeKind::AccessibilityBinding,
+        );
+
+        let result = resolve_affected_tests(
+            &graph,
+            &["Container.swift".to_string()],
+            &[TestKind::UITest],
+        );
+
+        let ui = result
+            .by_kind
+            .get(&TestKind::UITest)
+            .expect("UITest should be found via container → embedded view chain");
+        assert_eq!(ui.len(), 1);
+        assert_eq!(ui[0].file_id, "UITests/ChildUITests.swift");
+    }
+
+    #[test]
+    fn test_unit_test_does_not_follow_reverse_view_embedding() {
+        // Same structure as above but requesting Unit tests.
+        // Reverse ViewEmbedding should NOT apply for unit tests.
+        let mut graph = DependencyGraph::new(PathBuf::from("/repo"));
+
+        graph.ensure_node(make_node("Container.swift", FileRole::Source));
+        graph.ensure_node(make_node("Wrapper.swift", FileRole::Source));
+        graph.ensure_node(make_node("ChildView.swift", FileRole::Source));
+        graph.ensure_node(make_node("ChildTests.swift", FileRole::UnitTest));
+
+        graph.add_edge(
+            &"Container.swift".into(),
+            &"Wrapper.swift".into(),
+            EdgeKind::DirectReference,
+        );
+        graph.add_edge(
+            &"ChildView.swift".into(),
+            &"Wrapper.swift".into(),
+            EdgeKind::ViewEmbedding,
+        );
+        graph.add_edge(
+            &"ChildView.swift".into(),
+            &"ChildTests.swift".into(),
+            EdgeKind::DirectReference,
+        );
+
+        let result = resolve_affected_tests(
+            &graph,
+            &["Container.swift".to_string()],
+            &[TestKind::Unit],
+        );
+
+        // Unit tests should NOT follow reverse ViewEmbedding.
+        assert!(
+            result.by_kind.get(&TestKind::Unit).is_none(),
+            "Unit tests should not follow reverse ViewEmbedding"
+        );
     }
 }

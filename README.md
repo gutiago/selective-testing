@@ -1,6 +1,6 @@
 # selective-testing
 
-A high-performance Test Impact Analysis (TIA) tool for Swift/Xcode projects. Given a set of changed files, it identifies the minimal set of affected unit and snapshot tests — so you only run what matters.
+A high-performance Test Impact Analysis (TIA) tool for Swift/Xcode projects. Given a set of changed files, it identifies the minimal set of affected unit, snapshot, and UI tests — so you only run what matters.
 
 ## Problem
 
@@ -34,22 +34,29 @@ Swift projects that follow dependency injection patterns typically have **tests 
 - Changing `NetworkLayer.swift` should **not** trigger `CartServiceTests` — the test never touches `NetworkLayer`, it uses a spy.
 - Changing `CartService.swift` **should** trigger `CartServiceTests` — the test directly exercises this class.
 
-The difference between test kinds is how **views** are handled. Snapshot tests render real SwiftUI views. If `ProfileAvatar` is embedded inside `ProfileScreen`, changing `ProfileAvatar`'s layout must re-snapshot `ProfileScreen` — because the rendered output literally changes. Both kinds use test doubles for non-view dependencies, but snapshot tests must follow the real view hierarchy.
+The difference between test kinds is how **views** and **accessibility identifiers** are handled. Snapshot tests render real SwiftUI views, so they must follow the view embedding hierarchy. UI tests interact with the app through accessibility identifiers, so they need a different bridging mechanism.
 
-This leads to two distinct traversal strategies:
+This leads to three distinct traversal strategies:
 
 | Test Kind | Edges Followed | DirectReference Depth | ViewEmbedding Depth | Rationale |
 |-----------|---------------|----------------------|--------------------|-----------|
 | **Unit** | `DirectReference` | 2 hops | N/A | Tests inject spies/stubs — only direct callers matter |
 | **Snapshot** | `DirectReference` + `ViewEmbedding` | 2 hops | Unlimited | Visual changes cascade through the entire view tree |
+| **UI** | `DirectReference` + `ViewEmbedding` + `AccessibilityBinding` | 2 hops | Unlimited | Bridges source → test via shared accessibility identifiers |
 
-**DirectReference depth limit (both kinds):** The traversal follows at most 2 `DirectReference` hops from the changed file (changed file → direct dependents → their tests). This prevents fan-out through routers, coordinators, and service layers — since tests at those levels inject spies for the changed dependency, they're unaffected.
+**DirectReference depth limit (all kinds):** The traversal follows at most 2 `DirectReference` hops from the changed file (changed file → direct dependents → their tests). This prevents fan-out through routers, coordinators, and service layers — since tests at those levels inject spies for the changed dependency, they're unaffected.
 
-**ViewEmbedding unlimited (snapshot only):** `ViewEmbedding` edges represent a view rendering another view inside its `body`. These hops don't count toward the depth limit. A change in a leaf view at depth 10 of the view hierarchy will correctly trigger the root screen's snapshot tests.
+**ViewEmbedding unlimited (snapshot + UI):** `ViewEmbedding` edges represent a view rendering another view inside its `body`. These hops don't count toward the depth limit. A change in a leaf view at depth 10 of the view hierarchy will correctly trigger the root screen's snapshot tests. Traversal follows both outgoing edges (up to embedders) and incoming edges (down to embedded child views), with a `going_down` flag to prevent sideways spreading to unrelated embedders.
+
+**AccessibilityBinding (UI only):** `AccessibilityBinding` edges connect source files that set `.accessibilityIdentifier(...)` to test files that query the same identifier (via XCUIElement subscripts or custom page object helpers). These edges are built by matching accessibility identifier string literals across files. Crossing an `AccessibilityBinding` edge resets the DirectReference depth to 0, allowing the BFS to continue from the test's page objects to the test file itself.
 
 The traversal always stops at test files — their dependencies are fakes, not real implementations.
 
 Multiple test kinds are resolved in a single BFS pass.
+
+### UI test method-level precision
+
+For UI tests, the tool provides **method-level** granularity. After the BFS identifies affected UI test files, it post-filters to select only the specific test methods whose accessibility queries overlap with the impacted accessibility identifiers. This means a change to a login screen view only selects `testLogin`, not every test method in the file.
 
 ### Customizing traversal rules
 
@@ -62,7 +69,7 @@ The traversal logic is in [`src/graph/traversal.rs`](src/graph/traversal.rs):
 ```rust
 EdgeKind::DirectReference => {
     if direct_ref_depth < 2 {  // ← change this value
-        queue.push_back((edge.target(), direct_ref_depth + 1));
+        queue.push_back((edge.target(), direct_ref_depth + 1, going_down));
     }
 }
 ```
@@ -75,6 +82,7 @@ Increasing this means tests further from the changed file will be selected. Decr
 pub enum TestKind {
     Unit,
     Snapshot,
+    UITest,
     // YourNewKind,
 }
 
@@ -83,6 +91,7 @@ impl TestKind {
         match self {
             TestKind::Unit => &[EdgeKind::DirectReference],
             TestKind::Snapshot => &[EdgeKind::DirectReference, EdgeKind::ViewEmbedding],
+            TestKind::UITest => &[EdgeKind::DirectReference, EdgeKind::ViewEmbedding, EdgeKind::AccessibilityBinding],
             // TestKind::YourNewKind => &[...],
         }
     }
@@ -179,6 +188,7 @@ selective-testing resolve --base origin/master
 # Specific kinds
 selective-testing resolve --base origin/master --kind unit
 selective-testing resolve --base origin/master --kind snapshot
+selective-testing resolve --base origin/master --kind ui
 selective-testing resolve --base origin/master --kind unit --kind snapshot
 
 # JSON output for CI integration
@@ -318,7 +328,8 @@ Test files are classified automatically by path and import conventions:
 |---------|---------------|
 | `Tests/*Tests.swift` | Unit test |
 | `*SnapshotTests/*` or imports `SnapshotTesting` | Snapshot test |
-| `*UITests/*` or `*E2ETests/*` | Source (excluded — UI tests need a different approach) |
+| `*UITests/*` | UI test |
+| `*E2ETests/*` | E2E test |
 | Everything else | Source |
 
 ### Data source priority

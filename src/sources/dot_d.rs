@@ -72,6 +72,9 @@ impl DataSource for DotDSource {
                     defined_symbols: vec![],
                     content_hash: None,
                     mtime: None,
+                    a11y_setters: vec![],
+                    a11y_queries: vec![],
+                    test_methods: vec![],
                 }
             })
             .collect();
