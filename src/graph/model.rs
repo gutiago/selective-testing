@@ -206,6 +206,18 @@ impl DependencyGraph {
         }
     }
 
+    /// Remove all edges of a given kind from the entire graph.
+    pub fn remove_edges_by_kind(&mut self, kind: EdgeKind) {
+        let edges_to_remove: Vec<_> = self
+            .graph
+            .edge_indices()
+            .filter(|&e| self.graph[e].kind == kind)
+            .collect();
+        for edge_id in edges_to_remove {
+            self.graph.remove_edge(edge_id);
+        }
+    }
+
     /// Update metadata counts.
     pub fn update_metadata(&mut self) {
         self.metadata.file_count = self.graph.node_count();

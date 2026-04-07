@@ -4,6 +4,7 @@ mod graph;
 mod output;
 mod sources;
 mod swift;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -86,6 +87,7 @@ fn find_changed_files(
     cached: &graph::model::DependencyGraph,
     swift_files: &[PathBuf],
     repo_root: &Path,
+    blob_shas: &HashMap<String, String>,
 ) -> Vec<String> {
     let mut changed = Vec::new();
 
@@ -96,16 +98,12 @@ fn find_changed_files(
             .to_string_lossy()
             .to_string();
 
-        let current_mtime = std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs());
+        let current_sha = blob_shas.get(&rel);
 
         match cached.get_node(&rel) {
             Some(node) => {
-                // File exists in cache — check if mtime changed.
-                if node.mtime != current_mtime {
+                // File exists in cache — check if content changed via git blob SHA.
+                if node.content_hash.as_deref() != current_sha.map(|s| s.as_str()) {
                     changed.push(rel);
                 }
             }
@@ -165,10 +163,12 @@ fn cmd_index(
     let swift_files = discover_swift_files(&repo_root);
     info!(count = swift_files.len(), "Discovered Swift files");
 
+    let blob_shas = diff::git::git_blob_shas(&repo_root).unwrap_or_default();
+
     // Try incremental update if cached graph exists and not forced.
     if !force {
         if let Some(mut cached_graph) = graph::cache::load(&repo_root)? {
-            let changed = find_changed_files(&cached_graph, &swift_files, &repo_root);
+            let changed = find_changed_files(&cached_graph, &swift_files, &repo_root, &blob_shas);
             if changed.is_empty() {
                 info!(
                     files = cached_graph.metadata.file_count,
@@ -190,11 +190,11 @@ fn cmd_index(
                     Ok((mut new_nodes, new_edges)) => {
                         info!(changed = changed.len(), "Incremental update (indexstore)");
                         for node in &mut new_nodes {
-                            node.mtime = std::fs::metadata(&node.path)
-                                .and_then(|m| m.modified())
-                                .ok()
-                                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                                .map(|d| d.as_secs());
+                            let rel = node.path.strip_prefix(&repo_root)
+                                .unwrap_or(&node.path)
+                                .to_string_lossy()
+                                .to_string();
+                            node.content_hash = blob_shas.get(&rel).cloned();
                         }
                         let changed_ids: Vec<String> = changed;
                         graph::builder::update_graph_incremental(
@@ -203,7 +203,8 @@ fn cmd_index(
                             new_edges,
                             new_nodes,
                         );
-                        add_new_file_nodes(&mut cached_graph, &swift_files, &repo_root);
+                        add_new_file_nodes(&mut cached_graph, &swift_files, &repo_root, &blob_shas);
+                        supplement_a11y_edges(&mut cached_graph, &repo_root, &swift_files);
                         cached_graph.update_metadata();
                         graph::cache::save(&cached_graph, &repo_root)?;
                         eprintln!(
@@ -228,7 +229,7 @@ fn cmd_index(
                     // Jump to the full index path below.
                     let mut g = graph::builder::build_graph(&repo_root, nodes, edges)?;
                     g.metadata.data_sources_used.push("indexstore".to_string());
-                    return finish_full_index(g, &swift_files, &repo_root, derived_data);
+                    return finish_full_index(g, &swift_files, &repo_root, derived_data, &blob_shas);
                 }
             }
 
@@ -237,11 +238,11 @@ fn cmd_index(
             let ts = sources::treesitter::TreeSitterSource;
             let (mut new_nodes, new_edges) = ts.analyze(&repo_root, &changed_paths)?;
             for node in &mut new_nodes {
-                node.mtime = std::fs::metadata(&node.path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs());
+                let rel = node.path.strip_prefix(&repo_root)
+                    .unwrap_or(&node.path)
+                    .to_string_lossy()
+                    .to_string();
+                node.content_hash = blob_shas.get(&rel).cloned();
             }
             let changed_ids: Vec<String> = changed;
             graph::builder::update_graph_incremental(
@@ -250,7 +251,7 @@ fn cmd_index(
                 new_edges,
                 new_nodes,
             );
-            add_new_file_nodes(&mut cached_graph, &swift_files, &repo_root);
+            add_new_file_nodes(&mut cached_graph, &swift_files, &repo_root, &blob_shas);
             cached_graph.update_metadata();
             graph::cache::save(&cached_graph, &repo_root)?;
             eprintln!(
@@ -283,17 +284,18 @@ fn cmd_index(
         }
     };
 
-    finish_full_index(dep_graph, &swift_files, &repo_root, derived_data)
+    finish_full_index(dep_graph, &swift_files, &repo_root, derived_data, &blob_shas)
 }
 
-/// Store mtimes, supplement with .d files, save cache.
+/// Store blob SHAs, supplement with a11y edges and .d files, save cache.
 fn finish_full_index(
     mut dep_graph: graph::model::DependencyGraph,
     swift_files: &[PathBuf],
     repo_root: &Path,
     derived_data: Option<PathBuf>,
+    blob_shas: &HashMap<String, String>,
 ) -> Result<()> {
-    // Store mtimes for incremental updates.
+    // Store git blob SHAs for incremental change detection.
     for path in swift_files {
         let rel = path
             .strip_prefix(repo_root)
@@ -301,46 +303,11 @@ fn finish_full_index(
             .to_string_lossy()
             .to_string();
         if let Some(&idx) = dep_graph.file_index.get(&rel) {
-            let mtime = std::fs::metadata(path)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
-            dep_graph.graph[idx].mtime = mtime;
+            dep_graph.graph[idx].content_hash = blob_shas.get(&rel).cloned();
         }
     }
 
-    // Supplement with AccessibilityBinding + ViewEmbedding edges when IndexStoreDB is primary.
-    // IndexStoreDB only produces DirectReference edges; a11y extraction and view-body
-    // detection require tree-sitter.
-    if dep_graph.metadata.data_sources_used.contains(&"indexstore".to_string()) {
-        info!("Supplementing IndexStoreDB graph with a11y + view-embedding edges via tree-sitter");
-        let ts_source = sources::treesitter::TreeSitterSource;
-        if let Ok((ts_nodes, ts_edges)) = ts_source.analyze(repo_root, swift_files) {
-            // Patch FileNodes with a11y data (setters, queries, test_methods).
-            for node in ts_nodes {
-                if let Some(&idx) = dep_graph.file_index.get(&node.id) {
-                    dep_graph.graph[idx].a11y_setters = node.a11y_setters;
-                    dep_graph.graph[idx].a11y_queries = node.a11y_queries;
-                    dep_graph.graph[idx].test_methods = node.test_methods;
-                }
-            }
-            // Add AccessibilityBinding and ViewEmbedding edges.
-            // ViewEmbedding edges allow unlimited depth traversal through SwiftUI view
-            // hierarchies — without them, deep view trees hit the depth-2 DirectReference
-            // limit and miss UI tests connected via a11y bindings.
-            for edge in &ts_edges {
-                if (edge.kind == graph::model::EdgeKind::AccessibilityBinding
-                    || edge.kind == graph::model::EdgeKind::ViewEmbedding)
-                    && dep_graph.file_index.contains_key(&edge.from)
-                    && dep_graph.file_index.contains_key(&edge.to)
-                {
-                    dep_graph.add_edge(&edge.from, &edge.to, edge.kind);
-                }
-            }
-            dep_graph.metadata.data_sources_used.push("treesitter-supplement".to_string());
-        }
-    }
+    supplement_a11y_edges(&mut dep_graph, repo_root, swift_files);
 
     // If DerivedData is available, supplement with .d files.
     if let Some(dd_path) = derived_data {
@@ -379,11 +346,60 @@ fn finish_full_index(
     Ok(())
 }
 
+/// Supplement an IndexStoreDB graph with AccessibilityBinding + ViewEmbedding edges via tree-sitter.
+/// IndexStoreDB only produces DirectReference edges; a11y extraction and view-body
+/// detection require tree-sitter.
+fn supplement_a11y_edges(
+    dep_graph: &mut graph::model::DependencyGraph,
+    repo_root: &Path,
+    swift_files: &[PathBuf],
+) {
+    if !dep_graph.metadata.data_sources_used.contains(&"indexstore".to_string()) {
+        return;
+    }
+
+    info!("Supplementing IndexStoreDB graph with a11y + view-embedding edges via tree-sitter");
+
+    // Remove existing a11y and view-embedding edges before re-supplementing
+    // to avoid duplicates on incremental updates.
+    dep_graph.remove_edges_by_kind(graph::model::EdgeKind::AccessibilityBinding);
+    dep_graph.remove_edges_by_kind(graph::model::EdgeKind::ViewEmbedding);
+
+    let ts_source = sources::treesitter::TreeSitterSource;
+    if let Ok((ts_nodes, ts_edges)) = ts_source.analyze(repo_root, swift_files) {
+        // Patch FileNodes with a11y data (setters, queries, test_methods).
+        for node in ts_nodes {
+            if let Some(&idx) = dep_graph.file_index.get(&node.id) {
+                dep_graph.graph[idx].a11y_setters = node.a11y_setters;
+                dep_graph.graph[idx].a11y_queries = node.a11y_queries;
+                dep_graph.graph[idx].test_methods = node.test_methods;
+            }
+        }
+        // Add AccessibilityBinding and ViewEmbedding edges.
+        // ViewEmbedding edges allow unlimited depth traversal through SwiftUI view
+        // hierarchies — without them, deep view trees hit the depth-2 DirectReference
+        // limit and miss UI tests connected via a11y bindings.
+        for edge in &ts_edges {
+            if (edge.kind == graph::model::EdgeKind::AccessibilityBinding
+                || edge.kind == graph::model::EdgeKind::ViewEmbedding)
+                && dep_graph.file_index.contains_key(&edge.from)
+                && dep_graph.file_index.contains_key(&edge.to)
+            {
+                dep_graph.add_edge(&edge.from, &edge.to, edge.kind);
+            }
+        }
+        if !dep_graph.metadata.data_sources_used.contains(&"treesitter-supplement".to_string()) {
+            dep_graph.metadata.data_sources_used.push("treesitter-supplement".to_string());
+        }
+    }
+}
+
 /// Add nodes for new files not yet in the graph.
 fn add_new_file_nodes(
     graph: &mut graph::model::DependencyGraph,
     swift_files: &[PathBuf],
     repo_root: &Path,
+    blob_shas: &HashMap<String, String>,
 ) {
     for path in swift_files {
         let rel = path
@@ -394,19 +410,14 @@ fn add_new_file_nodes(
         if !graph.file_index.contains_key(&rel) {
             let role = swift::file_classifier::classify_by_path(path);
             let module = swift::file_classifier::infer_module(Path::new(&rel));
-            let mtime = std::fs::metadata(path)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
             graph.ensure_node(graph::model::FileNode {
-                id: rel,
+                id: rel.clone(),
                 path: path.clone(),
                 role,
                 module,
                 defined_symbols: vec![],
-                content_hash: None,
-                mtime,
+                content_hash: blob_shas.get(&rel).cloned(),
+                mtime: None,
                 a11y_setters: vec![],
                 a11y_queries: vec![],
                 test_methods: vec![],

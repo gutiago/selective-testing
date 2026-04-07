@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -188,6 +189,21 @@ fn parse_github_repo_slug(url: &str) -> Option<String> {
         return None;
     };
     Some(path.trim_end_matches(".git").to_string())
+}
+
+/// Return a map of relative path → git blob SHA hex for all tracked .swift files.
+/// Uses the git index directly so it is unaffected by filesystem mtime changes.
+pub fn git_blob_shas(repo_root: &Path) -> Result<HashMap<String, String>> {
+    let repo = Repository::open(repo_root).context("Failed to open git repository")?;
+    let index = repo.index().context("Failed to read git index")?;
+    let mut shas = HashMap::new();
+    for entry in index.iter() {
+        let path_str = String::from_utf8_lossy(&entry.path).to_string();
+        if path_str.ends_with(".swift") && !should_skip(&path_str) {
+            shas.insert(path_str, entry.id.to_string());
+        }
+    }
+    Ok(shas)
 }
 
 fn should_skip(path: &str) -> bool {
