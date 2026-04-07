@@ -53,6 +53,7 @@ fn main() -> Result<()> {
             base,
             kind,
             format,
+            _extra: _,
         } => {
             cmd_resolve(&cli, base, kind, *format)?;
         }

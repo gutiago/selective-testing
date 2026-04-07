@@ -49,6 +49,7 @@ pub enum Command {
     },
 
     /// Find affected tests for a given diff
+    #[command(trailing_var_arg = true)]
     Resolve {
         /// Git ref to diff against (default: origin/master)
         #[arg(long, default_value = "origin/master")]
@@ -61,6 +62,10 @@ pub enum Command {
         /// Output format
         #[arg(long, value_enum, default_value = "list")]
         format: OutputFormat,
+
+        /// Ignored (accepts removed flags for backwards compatibility)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _extra: Vec<String>,
     },
 
     /// Inspect the dependency graph
