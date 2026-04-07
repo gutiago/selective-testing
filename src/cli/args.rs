@@ -61,14 +61,6 @@ pub enum Command {
         /// Output format
         #[arg(long, value_enum, default_value = "list")]
         format: OutputFormat,
-
-        /// Path to .xctestplan to filter output by (and modify in-place unless --dry-run)
-        #[arg(long)]
-        test_plan: Option<PathBuf>,
-
-        /// Filter output by test plan targets without modifying the file
-        #[arg(long)]
-        dry_run: bool,
     },
 
     /// Inspect the dependency graph

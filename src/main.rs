@@ -4,8 +4,6 @@ mod graph;
 mod output;
 mod sources;
 mod swift;
-mod xcode;
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -55,10 +53,8 @@ fn main() -> Result<()> {
             base,
             kind,
             format,
-            test_plan,
-            dry_run,
         } => {
-            cmd_resolve(&cli, base, kind, *format, test_plan.clone(), *dry_run)?;
+            cmd_resolve(&cli, base, kind, *format)?;
         }
         Command::Graph { file, cycles, dot } => {
             cmd_graph(&cli, file.clone(), *cycles, *dot)?;
@@ -456,8 +452,6 @@ fn cmd_resolve(
     base: &str,
     kinds: &[graph::model::TestKind],
     format: cli::args::OutputFormat,
-    test_plan: Option<PathBuf>,
-    dry_run: bool,
 ) -> Result<()> {
     let repo_root = resolve_repo_root(cli)?;
 
@@ -488,55 +482,9 @@ fn cmd_resolve(
         "Resolution complete"
     );
 
-    // Optionally filter by test plan targets (and modify the plan unless --dry-run).
-    if let Some(plan_path) = test_plan {
-        let mut plan = xcode::testplan::read(&plan_path)?;
-        let affected_files: Vec<String> = result
-            .all_tests()
-            .iter()
-            .map(|t| t.file_id.clone())
-            .collect();
-        let disabled = xcode::testplan::disable_unaffected_targets(&mut plan, &affected_files);
-
-        if !dry_run {
-            xcode::testplan::write(&plan, &plan_path)?;
-        }
-
-        // Collect enabled targets as (name, container_path) pairs for filtering and xcodebuild output.
-        let enabled_targets: Vec<(String, String)> = plan
-            .test_targets
-            .iter()
-            .filter(|t| t.enabled != Some(false))
-            .map(|t| {
-                let path = t
-                    .target
-                    .container_path
-                    .strip_prefix("container:")
-                    .unwrap_or(&t.target.container_path)
-                    .to_string();
-                (t.target.name.clone(), path)
-            })
-            .collect();
-
-        // Filter result to only show files belonging to enabled targets.
-        let filtered = result.filter_by_targets(&enabled_targets);
-
-        let formatted = output::format_result(&filtered, format);
-        if !formatted.is_empty() {
-            println!("{}", formatted);
-        }
-
-        info!(
-            enabled_targets = plan.test_targets.len() - disabled.len(),
-            disabled_targets = disabled.len(),
-            dry_run = dry_run,
-            "Test plan targets resolved"
-        );
-    } else {
-        let formatted = output::format_result(&result, format);
-        if !formatted.is_empty() {
-            println!("{}", formatted);
-        }
+    let formatted = output::format_result(&result, format);
+    if !formatted.is_empty() {
+        println!("{}", formatted);
     }
 
     Ok(())
