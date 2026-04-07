@@ -393,6 +393,7 @@ fn add_new_file_nodes(
             .to_string();
         if !graph.file_index.contains_key(&rel) {
             let role = swift::file_classifier::classify_by_path(path);
+            let module = swift::file_classifier::infer_module(Path::new(&rel));
             let mtime = std::fs::metadata(path)
                 .and_then(|m| m.modified())
                 .ok()
@@ -402,7 +403,7 @@ fn add_new_file_nodes(
                 id: rel,
                 path: path.clone(),
                 role,
-                module: None,
+                module,
                 defined_symbols: vec![],
                 content_hash: None,
                 mtime,

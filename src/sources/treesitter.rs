@@ -109,7 +109,7 @@ impl DataSource for TreeSitterSource {
                 id: fd.file_id.clone(),
                 path: fd.path.clone(),
                 role: fd.role.clone(),
-                module: None,
+                module: file_classifier::infer_module(std::path::Path::new(&fd.file_id)),
                 defined_symbols: fd.defines.clone(),
                 content_hash: None,
                 mtime: None,

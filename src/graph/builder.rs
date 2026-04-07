@@ -60,6 +60,7 @@ pub fn update_graph_incremental(
             existing.content_hash = node.content_hash;
             existing.mtime = node.mtime;
             existing.defined_symbols = node.defined_symbols;
+            existing.module = node.module;
         } else {
             graph.ensure_node(node);
         }

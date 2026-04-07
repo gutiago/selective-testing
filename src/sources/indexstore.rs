@@ -250,11 +250,12 @@ fn build_from_edges(
         .into_iter()
         .map(|(id, path)| {
             let role = file_classifier::classify_by_path(&path);
+            let module = file_classifier::infer_module(std::path::Path::new(&id));
             FileNode {
                 id,
                 path,
                 role,
-                module: None,
+                module,
                 defined_symbols: vec![],
                 content_hash: None,
                 mtime: None,

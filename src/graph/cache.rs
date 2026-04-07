@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use super::model::DependencyGraph;
+use crate::swift::file_classifier;
 
 const CACHE_DIR: &str = ".selective-testing";
 
@@ -45,8 +46,14 @@ pub fn load(repo_root: &Path) -> Result<Option<DependencyGraph>> {
         if path.exists() {
             let data = fs::read(&path)
                 .with_context(|| format!("Failed to read cache file: {}", path.display()))?;
-            let graph: DependencyGraph =
+            let mut graph: DependencyGraph =
                 rmp_serde::from_slice(&data).context("Failed to deserialize graph cache")?;
+            // Backfill module for nodes cached before module inference was added.
+            for node in graph.graph.node_weights_mut() {
+                if node.module.is_none() {
+                    node.module = file_classifier::infer_module(Path::new(&node.id));
+                }
+            }
             tracing::info!(
                 path = %path.display(),
                 source = source,
