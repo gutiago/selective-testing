@@ -89,21 +89,21 @@ Each source node's unit test is shown on the right:
 
               ┌──────────────────┐           ┌──────────────────────────┐
               │ CartCoordinator  │╌╌╌╌╌╌╌╌╌► │ CartCoordinatorTests     │
-              └──────────────────┘  BLOCKED  │ ❌ not selected          │
+              └──────────────────┘  BLOCKED  │ ✗ not selected           │
                        │           (hop 2)   │ (injects CartVMSpy)      │
                     uses                     └──────────────────────────┘
                        │
                        ▼
               ┌──────────────────┐           ┌──────────────────────────┐
-              │ CartVM           │╌╌╌╌╌╌╌╌╌►│ CartVMTests               │
-              └──────────────────┘  BLOCKED  │ ❌ not selected          │
+              │ CartVM           │╌╌╌╌╌╌╌╌╌► │ CartVMTests              │
+              └──────────────────┘  BLOCKED  │ ✗ not selected           │
                        │           (hop 2)   │ (injects CartServiceSpy) │
                     uses                     └──────────────────────────┘
                        │
                        ▼
               ╔══════════════════╗           ┌──────────────────────────┐
               ║ CartService      ║──────────►│ CartServiceTests         │
-              ║ (changed)        ║ DirectRef │ ✅ selected (hop 1)       │
+              ║ (changed)        ║ DirectRef │ ✓ selected (hop 1)       │
               ╚══════════════════╝  (hop 1)  │ (directly tests          │
                        │                     │  CartService)            │
                        │                     └──────────────────────────┘
@@ -111,7 +111,7 @@ Each source node's unit test is shown on the right:
                        │ DirectRef            ┌──────────────────────────┐
                        └─────────────────────►│ MediaCarouselItemBuilder │
                             (hop 1)           │ Tests                    │
-                                              │ ✅ selected (hop 1)       │
+                                              │ ✓ selected (hop 1)       │
                                               │ (directly references     │
                                               │  CartService to build    │
                                               │  media items)            │
@@ -159,7 +159,7 @@ and each one's snapshot test is selected:
 
                    ┌──────────────────┐          ┌──────────────────────────┐
                    │ SettingsScreen   │─────────►│ SettingsSnapshotTests    │
-                   └──────────────────┘ DirectRef│ ✅ selected               │
+                   └──────────────────┘ DirectRef│ ✓ selected               │
                       │              │           └──────────────────────────┘
              ViewEmbedding    ViewEmbedding
                       │              │
@@ -174,7 +174,7 @@ and each one's snapshot test is selected:
                    ▼
           ╔════════════════╗             ┌──────────────────────────┐
           ║ AvatarView     ║────────────►│ AvatarSnapshotTests      │
-          ║ (changed)      ║  DirectRef  │ ✅ selected               │
+          ║ (changed)      ║  DirectRef  │ ✓ selected               │
           ╚════════════════╝             └──────────────────────────┘
 ```
 
@@ -218,13 +218,13 @@ is selected.
                  View Tree                        Page Objects            UI Tests
                  ─────────                        ────────────            ────────
 
-            ┌───────────────────┐  ③ A11yBinding ┌──────────────┐ DirectRef ┌─────────────────────┐
-       ┌───►│ CheckoutScreen    │───────────────►│ CheckoutPage │────────►│ CheckoutUITests     │
-       │    │ "checkout_total"  │ "checkout_total"│              │ (hop 1)  │ testCheckout()  ✅  │
-       │    └───────────────────┘  (depth → 0)   └──────────────┘          │ testPromoCode() ❌  │
-       │        │            │                                             └─────────────────────┘
-  ② ViewEmbed   │            │
-    (↑ up)  ④ ViewEmbed  ViewEmbed
+            ┌───────────────────┐ 3 A11yBinding  ┌──────────────┐ DirectRef ┌─────────────────────┐
+       ┌───►│ CheckoutScreen    │───────────────►│ CheckoutPage │──────────►│ CheckoutUITests     │
+       │    │ "checkout_total"  │"checkout_total"│              │ (hop 1)   │ testCheckout()  ✓   │
+       │    └───────────────────┘  (depth → 0)   └──────────────┘           │ testPromoCode() ✗   │
+       │        │            │                                              └─────────────────────┘
+  2 ViewEmbed   │            │
+    (↑ up)  4 ViewEmbed  ViewEmbed
        │      (↓ down)   (↓ down)
        │        │            │
        │        ▼            ▼
@@ -234,20 +234,20 @@ is selected.
        │   └──────────────┘  │  — no bridge)│
        │        │            └──────────────┘
        │        │
-       │   ③ A11yBinding    ┌──────────────┐  DirectRef   ┌─────────────────────┐
-       │    "ship_addr" ───►│ ShippingPage │────────────►│ ShippingUITests     │
-       │    (depth → 0)     │              │   (hop 1)    │ testAddress()  ✅   │
-       │                    └──────────────┘              │ testTracking() ❌   │
+       │   3 A11yBinding    ┌──────────────┐  DirectRef   ┌─────────────────────┐
+       │    "ship_addr" ───►│ ShippingPage │─────────────►│ ShippingUITests     │
+       │    (depth → 0)     │              │   (hop 1)    │ testAddress()  ✓    │
+       │                    └──────────────┘              │ testTracking() ✗    │
        │                                                  └─────────────────────┘
        │
-  ┌───────────────────┐       ③ A11yBinding ┌──────────────┐ DirectRef ┌─────────────────────┐
-  │ PaymentView       │────────────────────►│ PaymentPage  │────────►│ PaymentUITests      │
-  │ "pay_button"      │     "pay_button"    │              │ (hop 1)  │ testPay()      ✅   │
-  │ "pay_amount"      │     (depth → 0)     └──────────────┘          │ testAmount()   ✅   │
-  └───────────────────┘                                               └─────────────────────┘
+  ┌───────────────────┐      3 A11yBinding  ┌──────────────┐ DirectRef ┌─────────────────────┐
+  │ PaymentView       │────────────────────►│ PaymentPage  │──────────►│ PaymentUITests      │
+  │ "pay_button"      │     "pay_button"    │              │ (hop 1)   │ testPay()      ✓    │
+  │ "pay_amount"      │     (depth → 0)     └──────────────┘           │ testAmount()   ✓    │
+  └───────────────────┘                                                └─────────────────────┘
            ▲
            │
-  ① DirectRef (hop 1)
+  1 DirectRef (hop 1)
            │
   ╔═══════════════════╗
   ║ PaymentService    ║
@@ -257,25 +257,25 @@ is selected.
 
 **How the BFS reaches 3 UI test files from 1 changed service:**
 
-① **DirectRef** — `PaymentService` → `PaymentView` (hop 1). The view directly
+1. **DirectRef** — `PaymentService` → `PaymentView` (hop 1). The view directly
    uses the service. Its a11y identifiers `"pay_button"` and `"pay_amount"`
    are now impacted.
 
-② **ViewEmbedding ↑** — `PaymentView` → `CheckoutScreen` (up to embedder).
+2. **ViewEmbedding ↑** — `PaymentView` → `CheckoutScreen` (up to embedder).
    ViewEmbedding hops don't count toward the depth limit. `CheckoutScreen`'s
    a11y identifier `"checkout_total"` is added to the impacted set.
 
-③ **AccessibilityBinding** — each visited view with impacted a11y IDs bridges
+3. **AccessibilityBinding** — each visited view with impacted a11y IDs bridges
    to page objects that query the same identifiers. Crossing this edge
    **resets depth to 0**, then a DirectRef hop (1) reaches the test file.
 
-④ **ViewEmbedding ↓** — `CheckoutScreen` → `ShippingView`, `PromoCodeView`
+4. **ViewEmbedding ↓** — `CheckoutScreen` → `ShippingView`, `PromoCodeView`
    (down into embedded children). Enters `going_down` mode to prevent
    spreading back up to unrelated parent screens. `ShippingView`'s
    `"ship_addr"` is added to the impacted set. `PromoCodeView` has no a11y
    identifiers — it's visited but creates no bridge.
 
-⑤ **Method filtering** — after the BFS, each UI test is filtered to only the
+5. **Method filtering** — after the BFS, each UI test is filtered to only the
    methods that query impacted identifiers:
    - `testPay()` queries `"pay_button"` → **selected**
    - `testAmount()` queries `"pay_amount"` → **selected**
@@ -295,8 +295,8 @@ The tool resolves them in a **single BFS pass** using the widest edge set.
 
 ```
               ╔═════════════════════╗           ┌──────────────────────┐
-              ║ ProfileView.swift   ║──────────►│ ProfileViewTests     │ (unit)     ✅
-              ║ (changed)           ║  DirectRef └──────────────────────┘
+              ║ ProfileView.swift   ║──────────►│ ProfileViewTests     │ (unit)     ✓
+              ║ (changed)           ║ DirectRef └──────────────────────┘
               ║ sets "profile_name" ║   (hop 1)
               ╚═════════════════════╝
                     │            │
@@ -304,15 +304,15 @@ The tool resolves them in a **single BFS pass** using the widest edge set.
               (depth 0)    (resets to 0)
                     │            │
                     ▼            ▼
-           ┌──────────────┐  ┌────────────────┐  DirectRef  ┌──────────────────┐
-           │ SettingsScreen│  │ ProfilePage    │───────────►│ ProfileUITests   │
-           └──────────────┘  │ "profile_name" │   (hop 1)   │                  │
-                    │        └────────────────┘             │ testProfile()  ✅ │
-               DirectRef                                    │ testSettings() ❌ │
+           ┌───────────────┐ ┌────────────────┐  DirectRef  ┌──────────────────┐
+           │ SettingsScreen│ │ ProfilePage    │────────────►│ ProfileUITests   │
+           └───────────────┘ │ "profile_name" │   (hop 1)   │                  │
+                    │        └────────────────┘             │ testProfile()  ✓ │
+               DirectRef                                    │ testSettings() ✗ │
                 (hop 1)                                     └──────────────────┘
                     ▼                                        (ui, method
            ┌──────────────────────┐                          precision)
-           │ SettingsSnapshot     │ (snapshot)  ✅
+           │ SettingsSnapshot     │ (snapshot)  ✓
            │ Tests                │
            └──────────────────────┘
 ```
