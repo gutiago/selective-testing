@@ -40,11 +40,11 @@ This leads to three distinct traversal strategies:
 
 | Test Kind | Edges Followed | DirectReference Depth | ViewEmbedding Depth | Rationale |
 |-----------|---------------|----------------------|--------------------|-----------|
-| **Unit** | `DirectReference` | 2 hops | N/A | Tests inject spies/stubs — only direct callers matter |
-| **Snapshot** | `DirectReference` + `ViewEmbedding` | 2 hops | Unlimited | Visual changes cascade through the entire view tree |
-| **UI** | `DirectReference` + `ViewEmbedding` + `AccessibilityBinding` | 2 hops | Unlimited | Bridges source → test via shared accessibility identifiers |
+| **Unit** | `DirectReference` | 1 hop | N/A | Only tests that directly reference the changed file |
+| **Snapshot** | `DirectReference` + `ViewEmbedding` | 1 hop | Unlimited | Visual changes cascade through the entire view tree |
+| **UI** | `DirectReference` + `ViewEmbedding` + `AccessibilityBinding` | 1 hop | Unlimited | Bridges source → test via shared accessibility identifiers |
 
-**DirectReference depth limit (all kinds):** The traversal follows at most 2 `DirectReference` hops from the changed file (changed file → direct dependents → their tests). This prevents fan-out through routers, coordinators, and service layers — since tests at those levels inject spies for the changed dependency, they're unaffected.
+**DirectReference depth limit (all kinds):** The traversal follows at most 1 `DirectReference` hop from the changed file — only tests that directly reference the changed file are selected. Indirect dependents (e.g., a ViewModel that uses the changed Service) are not followed, because their tests inject spies/stubs for the changed dependency and are unaffected.
 
 **ViewEmbedding unlimited (snapshot + UI):** `ViewEmbedding` edges represent a view rendering another view inside its `body`. These hops don't count toward the depth limit. A change in a leaf view at depth 10 of the view hierarchy will correctly trigger the root screen's snapshot tests. Traversal follows both outgoing edges (up to embedders) and incoming edges (down to embedded child views), with a `going_down` flag to prevent sideways spreading to unrelated embedders.
 
@@ -58,23 +58,285 @@ Multiple test kinds are resolved in a single BFS pass.
 
 For UI tests, the tool provides **method-level** granularity. After the BFS identifies affected UI test files, it post-filters to select only the specific test methods whose accessibility queries overlap with the impacted accessibility identifiers. This means a change to a login screen view only selects `testLogin`, not every test method in the file.
 
+### Visual examples
+
+These diagrams show how the BFS traces from a changed file to affected tests. Arrows represent edges in the graph — `A → B` means "A is used by B". Dashed arrows are blocked paths.
+
+#### Unit test — DirectReference only, 1-hop depth limit
+
+You change `CartService.swift`. The BFS follows `DirectReference` edges outward,
+stopping at depth 1. Only tests that **directly reference** the changed file are
+selected — indirect dependents inject spies/stubs and are unaffected.
+
+Consider this dependency tree — each parent imports/uses the child:
+
+```swift
+class CartCoordinator {
+    let vm: CartVMProtocol          // injected (spy in tests)
+}
+class CartVM {
+    let service: CartServiceProtocol // injected (spy in tests)
+}
+```
+
+The graph stores DirectReference edges from dependency → dependent ("is used by").
+The BFS follows these edges outward from the changed file, but only 1 hop deep.
+Each source node's unit test is shown on the right:
+
+```
+                  Dependency Tree                          Unit Tests
+                  ───────────────                          ──────────
+
+              ┌──────────────────┐           ┌──────────────────────────┐
+              │ CartCoordinator  │╌╌╌╌╌╌╌╌╌► │ CartCoordinatorTests     │
+              └──────────────────┘  BLOCKED  │ ❌ not selected          │
+                       │           (hop 2)   │ (injects CartVMSpy)      │
+                    uses                     └──────────────────────────┘
+                       │
+                       ▼
+              ┌──────────────────┐           ┌──────────────────────────┐
+              │ CartVM           │╌╌╌╌╌╌╌╌╌►│ CartVMTests               │
+              └──────────────────┘  BLOCKED  │ ❌ not selected          │
+                       │           (hop 2)   │ (injects CartServiceSpy) │
+                    uses                     └──────────────────────────┘
+                       │
+                       ▼
+              ╔══════════════════╗           ┌──────────────────────────┐
+              ║ CartService      ║──────────►│ CartServiceTests         │
+              ║ (changed)        ║ DirectRef │ ✅ selected (hop 1)       │
+              ╚══════════════════╝  (hop 1)  │ (directly tests          │
+                       │                     │  CartService)            │
+                       │                     └──────────────────────────┘
+                       │
+                       │ DirectRef            ┌──────────────────────────┐
+                       └─────────────────────►│ MediaCarouselItemBuilder │
+                            (hop 1)           │ Tests                    │
+                                              │ ✅ selected (hop 1)       │
+                                              │ (directly references     │
+                                              │  CartService to build    │
+                                              │  media items)            │
+                                              └──────────────────────────┘
+```
+
+- **`CartServiceTests`** (hop 1) — directly tests `CartService`. Selected.
+- **`MediaCarouselItemBuilderTests`** (hop 1) — also directly references
+  `CartService` (e.g., creates a real instance to build media carousel items).
+  Since it uses the real class, not a spy, a change can break it. Selected.
+- **`CartVMTests`** (hop 2) — blocked. `CartVMTests` injects a `CartServiceSpy`,
+  never touching the real `CartService`. The change can't affect it.
+- **`CartCoordinatorTests`** (hop 2) — also blocked for the same reason: injects a
+  `CartVMSpy`, never touching the real `CartVM` or `CartService`.
+
+#### Snapshot test — ViewEmbedding chain, unlimited depth
+
+You change `AvatarView.swift`. Snapshot tests render real SwiftUI views, so a
+visual change in a leaf view must propagate up to every screen that renders it.
+
+Consider this view tree in Swift — each parent embeds child views in its `body`:
+
+```swift
+struct SettingsScreen: View {       // root
+    var body: some View {
+        ProfileHeader()             //   ├── ProfileHeader
+        NotificationToggle()        //   └── NotificationToggle
+    }
+}
+struct ProfileHeader: View {
+    var body: some View {
+        AvatarView()                //       └── AvatarView
+    }
+}
+```
+
+The graph stores ViewEmbedding edges from child → parent (the child "is rendered
+by" the parent). The BFS follows these edges **with no depth limit**, propagating
+up the tree. Every ancestor that renders the changed view is visually affected,
+and each one's snapshot test is selected:
+
+```
+                        View Tree                         Snapshot Tests
+                        ─────────                         ──────────────
+
+                   ┌──────────────────┐          ┌──────────────────────────┐
+                   │ SettingsScreen   │─────────►│ SettingsSnapshotTests    │
+                   └──────────────────┘ DirectRef│ ✅ selected               │
+                      │              │           └──────────────────────────┘
+             ViewEmbedding    ViewEmbedding
+                      │              │
+                      ▼              ▼
+          ┌────────────────┐  ┌────────────────┐  ┌────────────────────────┐
+          │ ProfileHeader  │  │ Notification   │  │ NotificationSnapshot   │
+          │                │  │ Toggle         │──►  Tests                 │
+          └────────────────┘  └────────────────┘  │ (not affected)         │
+                   │                              └────────────────────────┘
+              ViewEmbedding
+                   │
+                   ▼
+          ╔════════════════╗             ┌──────────────────────────┐
+          ║ AvatarView     ║────────────►│ AvatarSnapshotTests      │
+          ║ (changed)      ║  DirectRef  │ ✅ selected               │
+          ╚════════════════╝             └──────────────────────────┘
+```
+
+Changing `AvatarView` triggers `AvatarSnapshotTests` (its own test) and
+`SettingsSnapshotTests` (an ancestor that renders it). `NotificationSnapshotTests`
+is **not** triggered — it's a sibling branch in the view tree, not an ancestor.
+
+ViewEmbedding hops don't count toward the DirectReference depth limit, so the
+final DirectRef hop to each snapshot test is still at depth 1 regardless of
+how deep the view tree is.
+
+#### UI test — AccessibilityBinding bridge + method-level precision
+
+You change `PaymentService.swift`. Starting from one service file, the BFS
+ripples through three edge types to reach UI tests across the view hierarchy:
+
+```swift
+struct CheckoutScreen: View {
+    var body: some View {
+        PaymentView()        // embeds PaymentView
+        ShippingView()       // embeds ShippingView
+    }
+}
+struct PaymentView: View {
+    let service: PaymentService  // uses PaymentService directly
+    var body: some View {
+        Text(service.formattedAmount)
+            .accessibilityIdentifier("pay_amount")
+        Button("Pay")
+            .accessibilityIdentifier("pay_button")
+    }
+}
+```
+
+The BFS traverses DirectReference → ViewEmbedding → AccessibilityBinding,
+collecting impacted accessibility identifiers along the way. Each visited
+view's a11y IDs become impacted, and any UI test method querying those IDs
+is selected.
+
+```
+                 View Tree                        Page Objects            UI Tests
+                 ─────────                        ────────────            ────────
+
+            ┌───────────────────┐  ③ A11yBinding ┌──────────────┐ DirectRef ┌─────────────────────┐
+       ┌───►│ CheckoutScreen    │───────────────►│ CheckoutPage │────────►│ CheckoutUITests     │
+       │    │ "checkout_total"  │ "checkout_total"│              │ (hop 1)  │ testCheckout()  ✅  │
+       │    └───────────────────┘  (depth → 0)   └──────────────┘          │ testPromoCode() ❌  │
+       │        │            │                                             └─────────────────────┘
+  ② ViewEmbed   │            │
+    (↑ up)  ④ ViewEmbed  ViewEmbed
+       │      (↓ down)   (↓ down)
+       │        │            │
+       │        ▼            ▼
+       │   ┌──────────────┐  ┌──────────────┐
+       │   │ ShippingView │  │ PromoCodeView│
+       │   │ "ship_addr"  │  │ (no a11y IDs │
+       │   └──────────────┘  │  — no bridge)│
+       │        │            └──────────────┘
+       │        │
+       │   ③ A11yBinding    ┌──────────────┐  DirectRef   ┌─────────────────────┐
+       │    "ship_addr" ───►│ ShippingPage │────────────►│ ShippingUITests     │
+       │    (depth → 0)     │              │   (hop 1)    │ testAddress()  ✅   │
+       │                    └──────────────┘              │ testTracking() ❌   │
+       │                                                  └─────────────────────┘
+       │
+  ┌───────────────────┐       ③ A11yBinding ┌──────────────┐ DirectRef ┌─────────────────────┐
+  │ PaymentView       │────────────────────►│ PaymentPage  │────────►│ PaymentUITests      │
+  │ "pay_button"      │     "pay_button"    │              │ (hop 1)  │ testPay()      ✅   │
+  │ "pay_amount"      │     (depth → 0)     └──────────────┘          │ testAmount()   ✅   │
+  └───────────────────┘                                               └─────────────────────┘
+           ▲
+           │
+  ① DirectRef (hop 1)
+           │
+  ╔═══════════════════╗
+  ║ PaymentService    ║
+  ║ (changed)         ║
+  ╚═══════════════════╝
+```
+
+**How the BFS reaches 3 UI test files from 1 changed service:**
+
+① **DirectRef** — `PaymentService` → `PaymentView` (hop 1). The view directly
+   uses the service. Its a11y identifiers `"pay_button"` and `"pay_amount"`
+   are now impacted.
+
+② **ViewEmbedding ↑** — `PaymentView` → `CheckoutScreen` (up to embedder).
+   ViewEmbedding hops don't count toward the depth limit. `CheckoutScreen`'s
+   a11y identifier `"checkout_total"` is added to the impacted set.
+
+③ **AccessibilityBinding** — each visited view with impacted a11y IDs bridges
+   to page objects that query the same identifiers. Crossing this edge
+   **resets depth to 0**, then a DirectRef hop (1) reaches the test file.
+
+④ **ViewEmbedding ↓** — `CheckoutScreen` → `ShippingView`, `PromoCodeView`
+   (down into embedded children). Enters `going_down` mode to prevent
+   spreading back up to unrelated parent screens. `ShippingView`'s
+   `"ship_addr"` is added to the impacted set. `PromoCodeView` has no a11y
+   identifiers — it's visited but creates no bridge.
+
+⑤ **Method filtering** — after the BFS, each UI test is filtered to only the
+   methods that query impacted identifiers:
+   - `testPay()` queries `"pay_button"` → **selected**
+   - `testAmount()` queries `"pay_amount"` → **selected**
+   - Both methods exercise `PaymentView`, which is affected — so all of
+     `PaymentUITests` runs
+   - `testCheckout()` queries `"checkout_total"` → **selected**
+   - `testPromoCode()` queries `"promo_input"` → not impacted (set by an
+     unvisited view outside this tree) → **skipped**
+   - `testAddress()` queries `"ship_addr"` → **selected**
+   - `testTracking()` queries `"tracking_number"` → not impacted (set by
+     `TrackingView`, not in the affected view tree) → **skipped**
+
+#### Combined: all three kinds in one graph
+
+In practice, a single changed file can affect all three test kinds simultaneously.
+The tool resolves them in a **single BFS pass** using the widest edge set.
+
+```
+              ╔═════════════════════╗           ┌──────────────────────┐
+              ║ ProfileView.swift   ║──────────►│ ProfileViewTests     │ (unit)     ✅
+              ║ (changed)           ║  DirectRef └──────────────────────┘
+              ║ sets "profile_name" ║   (hop 1)
+              ╚═════════════════════╝
+                    │            │
+             ViewEmbedding  A11yBinding
+              (depth 0)    (resets to 0)
+                    │            │
+                    ▼            ▼
+           ┌──────────────┐  ┌────────────────┐  DirectRef  ┌──────────────────┐
+           │ SettingsScreen│  │ ProfilePage    │───────────►│ ProfileUITests   │
+           └──────────────┘  │ "profile_name" │   (hop 1)   │                  │
+                    │        └────────────────┘             │ testProfile()  ✅ │
+               DirectRef                                    │ testSettings() ❌ │
+                (hop 1)                                     └──────────────────┘
+                    ▼                                        (ui, method
+           ┌──────────────────────┐                          precision)
+           │ SettingsSnapshot     │ (snapshot)  ✅
+           │ Tests                │
+           └──────────────────────┘
+```
+
+One change, three kinds of tests found — each through different edge types, each with
+appropriate precision for how that kind of test actually exercises the code.
+
 ### Customizing traversal rules
 
 The default traversal rules reflect the patterns used in my own projects — dependency injection with test doubles and SwiftUI view hierarchies. Your codebase may follow different conventions. Here's how to adjust.
 
 The traversal logic is in [`src/graph/traversal.rs`](src/graph/traversal.rs):
 
-**Change the DirectReference depth limit** — modify the `depth < 2` check in the edge expansion:
+**Change the DirectReference depth limit** — modify the `depth < 1` check in the edge expansion:
 
 ```rust
 EdgeKind::DirectReference => {
-    if direct_ref_depth < 2 {  // ← change this value
+    if direct_ref_depth < 1 {  // ← change this value
         queue.push_back((edge.target(), direct_ref_depth + 1, going_down));
     }
 }
 ```
 
-Increasing this means tests further from the changed file will be selected. Decreasing to 1 means only tests that directly reference the changed file.
+Increasing to 2 means tests of indirect dependents (e.g., a ViewModel that uses the changed Service) will also be selected — useful if your tests don't inject spies for all dependencies.
 
 **Add a new test kind** — add a variant to `TestKind` in [`src/graph/model.rs`](src/graph/model.rs) and define which edges it follows:
 

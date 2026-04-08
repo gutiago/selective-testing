@@ -41,7 +41,8 @@ pub struct AffectedTest {
 /// Resolve all affected tests in a single BFS pass.
 ///
 /// Edge traversal rules:
-/// - **DirectReference**: depth 2 for all kinds (changed → dependents → tests)
+/// - **DirectReference**: depth 1 for all kinds (only tests that directly reference the
+///   changed file — indirect dependents inject spies/stubs, not real implementations)
 /// - **ViewEmbedding**: unlimited (visual changes cascade through view tree)
 /// - **AccessibilityBinding**: resets DirectReference depth to 0 (bridge to UI tests)
 ///
@@ -146,7 +147,8 @@ pub fn resolve_affected_tests(
         }
 
         // Expand outgoing edges:
-        // - DirectReference: limited to 2 hops
+        // - DirectReference: limited to 1 hop (only tests that directly reference the
+        //   changed file — indirect dependents use spies/stubs, not real implementations)
         // - ViewEmbedding: unlimited, but suppressed when going_down (prevents sideways
         //   spreading to unrelated embedders of the same view)
         // - AccessibilityBinding: resets depth to 0 (bridge edge)
@@ -158,7 +160,7 @@ pub fn resolve_affected_tests(
 
             match edge_kind {
                 EdgeKind::DirectReference => {
-                    if direct_ref_depth < 2 {
+                    if direct_ref_depth < 1 {
                         queue.push_back((edge.target(), direct_ref_depth + 1, going_down));
                     }
                 }
@@ -320,20 +322,19 @@ mod tests {
 
     #[test]
     fn test_unit_test_depth_limit() {
-        // A → B → C → CTests
-        // Changing A should find BTests (depth 2) but NOT CTests (depth 3)
+        // A → B → BTests, A → ATests
+        // Changing A should find ATests (depth 1, directly references A)
+        // but NOT BTests (depth 2 — B's tests inject a spy for A)
         let mut graph = DependencyGraph::new(PathBuf::from("/repo"));
 
         graph.ensure_node(make_node("A.swift", FileRole::Source));
         graph.ensure_node(make_node("B.swift", FileRole::Source));
-        graph.ensure_node(make_node("C.swift", FileRole::Source));
+        graph.ensure_node(make_node("ATests.swift", FileRole::UnitTest));
         graph.ensure_node(make_node("BTests.swift", FileRole::UnitTest));
-        graph.ensure_node(make_node("CTests.swift", FileRole::UnitTest));
 
         graph.add_edge(&"A.swift".into(), &"B.swift".into(), EdgeKind::DirectReference);
+        graph.add_edge(&"A.swift".into(), &"ATests.swift".into(), EdgeKind::DirectReference);
         graph.add_edge(&"B.swift".into(), &"BTests.swift".into(), EdgeKind::DirectReference);
-        graph.add_edge(&"B.swift".into(), &"C.swift".into(), EdgeKind::DirectReference);
-        graph.add_edge(&"C.swift".into(), &"CTests.swift".into(), EdgeKind::DirectReference);
 
         let result = resolve_affected_tests(
             &graph,
@@ -346,8 +347,8 @@ mod tests {
             .get(&TestKind::Unit)
             .map(|v| v.iter().map(|t| t.file_id.as_str()).collect())
             .unwrap_or_default();
-        assert!(unit_ids.contains(&"BTests.swift"), "BTests should be found (depth 2)");
-        assert!(!unit_ids.contains(&"CTests.swift"), "CTests should NOT be found (depth 3)");
+        assert!(unit_ids.contains(&"ATests.swift"), "ATests should be found (depth 1, directly references A)");
+        assert!(!unit_ids.contains(&"BTests.swift"), "BTests should NOT be found (depth 2 — uses ASpy, not real A)");
     }
 
     #[test]
@@ -450,11 +451,14 @@ mod tests {
 
     #[test]
     fn test_cycle_handling() {
+        // A ↔ B (cycle), A → ATests, B → BTests
+        // Changing B: BTests is found (depth 1), ATests is NOT (depth 2, uses BSpy)
         let mut graph = DependencyGraph::new(PathBuf::from("/repo"));
 
         graph.ensure_node(make_node("A.swift", FileRole::Source));
         graph.ensure_node(make_node("B.swift", FileRole::Source));
         graph.ensure_node(make_node("ATests.swift", FileRole::UnitTest));
+        graph.ensure_node(make_node("BTests.swift", FileRole::UnitTest));
 
         graph.add_edge(&"A.swift".into(), &"B.swift".into(), EdgeKind::DirectReference);
         graph.add_edge(&"B.swift".into(), &"A.swift".into(), EdgeKind::DirectReference);
@@ -463,14 +467,24 @@ mod tests {
             &"ATests.swift".into(),
             EdgeKind::DirectReference,
         );
+        graph.add_edge(
+            &"B.swift".into(),
+            &"BTests.swift".into(),
+            EdgeKind::DirectReference,
+        );
 
         let result = resolve_affected_tests(
             &graph,
             &["B.swift".to_string()],
             &[TestKind::Unit],
         );
-        assert_eq!(result.by_kind[&TestKind::Unit].len(), 1);
-        assert_eq!(result.by_kind[&TestKind::Unit][0].file_id, "ATests.swift");
+        let unit_ids: Vec<&str> = result
+            .by_kind
+            .get(&TestKind::Unit)
+            .map(|v| v.iter().map(|t| t.file_id.as_str()).collect())
+            .unwrap_or_default();
+        assert!(unit_ids.contains(&"BTests.swift"), "BTests should be found (depth 1)");
+        assert!(!unit_ids.contains(&"ATests.swift"), "ATests should NOT be found (depth 2, uses BSpy)");
     }
 
     #[test]
