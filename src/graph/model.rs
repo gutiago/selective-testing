@@ -176,13 +176,17 @@ impl DependencyGraph {
     }
 
     /// Remove all edges originating from a node (for incremental re-index).
+    ///
+    /// Indices are removed in descending order to avoid petgraph's swap-remove
+    /// invalidating indices that are still pending removal.
     pub fn remove_edges_from(&mut self, id: &FileId) {
         if let Some(&idx) = self.file_index.get(id) {
-            let edges_to_remove: Vec<_> = self
+            let mut edges_to_remove: Vec<_> = self
                 .graph
                 .edges(idx)
                 .map(|e| e.id())
                 .collect();
+            edges_to_remove.sort_unstable_by(|a, b| b.cmp(a));
             for edge_id in edges_to_remove {
                 self.graph.remove_edge(edge_id);
             }
@@ -194,12 +198,13 @@ impl DependencyGraph {
     pub fn remove_a11y_edges_to(&mut self, id: &FileId) {
         if let Some(&target_idx) = self.file_index.get(id) {
             use petgraph::Direction;
-            let edges_to_remove: Vec<_> = self
+            let mut edges_to_remove: Vec<_> = self
                 .graph
                 .edges_directed(target_idx, Direction::Incoming)
                 .filter(|e| e.weight().kind == EdgeKind::AccessibilityBinding)
                 .map(|e| e.id())
                 .collect();
+            edges_to_remove.sort_unstable_by(|a, b| b.cmp(a));
             for edge_id in edges_to_remove {
                 self.graph.remove_edge(edge_id);
             }
@@ -207,12 +212,16 @@ impl DependencyGraph {
     }
 
     /// Remove all edges of a given kind from the entire graph.
+    ///
+    /// Indices are removed in descending order to avoid petgraph's swap-remove
+    /// invalidating indices that are still pending removal.
     pub fn remove_edges_by_kind(&mut self, kind: EdgeKind) {
-        let edges_to_remove: Vec<_> = self
+        let mut edges_to_remove: Vec<_> = self
             .graph
             .edge_indices()
             .filter(|&e| self.graph[e].kind == kind)
             .collect();
+        edges_to_remove.sort_unstable_by(|a, b| b.cmp(a));
         for edge_id in edges_to_remove {
             self.graph.remove_edge(edge_id);
         }
@@ -222,5 +231,81 @@ impl DependencyGraph {
     pub fn update_metadata(&mut self) {
         self.metadata.file_count = self.graph.node_count();
         self.metadata.edge_count = self.graph.edge_count();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_node(id: &str) -> FileNode {
+        FileNode {
+            id: id.to_string(),
+            path: PathBuf::from(id),
+            role: FileRole::Source,
+            module: None,
+            defined_symbols: vec![],
+            content_hash: None,
+            mtime: None,
+            a11y_setters: vec![],
+            a11y_queries: vec![],
+            test_methods: vec![],
+        }
+    }
+
+    #[test]
+    fn remove_edges_by_kind_removes_all() {
+        let mut g = DependencyGraph::new(PathBuf::from("/repo"));
+        g.ensure_node(make_node("A"));
+        g.ensure_node(make_node("B"));
+        g.ensure_node(make_node("C"));
+        g.ensure_node(make_node("D"));
+        g.ensure_node(make_node("E"));
+
+        // Interleave DirectReference and AccessibilityBinding edges
+        // to stress the swap-remove ordering.
+        g.add_edge(&"A".into(), &"B".into(), EdgeKind::DirectReference);
+        g.add_edge(&"A".into(), &"C".into(), EdgeKind::AccessibilityBinding);
+        g.add_edge(&"B".into(), &"D".into(), EdgeKind::DirectReference);
+        g.add_edge(&"C".into(), &"D".into(), EdgeKind::AccessibilityBinding);
+        g.add_edge(&"D".into(), &"E".into(), EdgeKind::AccessibilityBinding);
+        g.add_edge(&"B".into(), &"E".into(), EdgeKind::DirectReference);
+
+        g.remove_edges_by_kind(EdgeKind::AccessibilityBinding);
+
+        let remaining: Vec<_> = g
+            .graph
+            .edge_indices()
+            .map(|e| g.graph[e].kind)
+            .collect();
+        assert!(
+            remaining.iter().all(|k| *k == EdgeKind::DirectReference),
+            "All AccessibilityBinding edges should be removed, but got: {:?}",
+            remaining
+        );
+        assert_eq!(remaining.len(), 3, "3 DirectReference edges should survive");
+    }
+
+    #[test]
+    fn remove_edges_from_removes_all_outgoing() {
+        let mut g = DependencyGraph::new(PathBuf::from("/repo"));
+        g.ensure_node(make_node("A"));
+        g.ensure_node(make_node("B"));
+        g.ensure_node(make_node("C"));
+        g.ensure_node(make_node("D"));
+
+        g.add_edge(&"A".into(), &"B".into(), EdgeKind::DirectReference);
+        g.add_edge(&"A".into(), &"C".into(), EdgeKind::DirectReference);
+        g.add_edge(&"A".into(), &"D".into(), EdgeKind::DirectReference);
+        // Edge from another node — should survive.
+        g.add_edge(&"B".into(), &"D".into(), EdgeKind::DirectReference);
+
+        g.remove_edges_from(&"A".into());
+
+        assert_eq!(g.graph.edge_count(), 1, "Only B→D should survive");
+        let edge = g.graph.edge_indices().next().unwrap();
+        let (src, dst) = g.graph.edge_endpoints(edge).unwrap();
+        assert_eq!(g.graph[src].id, "B");
+        assert_eq!(g.graph[dst].id, "D");
     }
 }

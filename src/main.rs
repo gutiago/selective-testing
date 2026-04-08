@@ -186,7 +186,7 @@ fn cmd_index(
 
             // Try incremental IndexStoreDB for changed files.
             if let Ok(source) = resolve_indexstore(&repo_root, index_store.clone(), helper_path.clone()) {
-                match source.analyze(&repo_root, &changed_paths) {
+                match source.analyze_incremental(&repo_root, &changed_paths, &swift_files) {
                     Ok((mut new_nodes, new_edges)) => {
                         info!(changed = changed.len(), "Incremental update (indexstore)");
                         for node in &mut new_nodes {

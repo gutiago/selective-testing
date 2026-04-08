@@ -32,6 +32,7 @@ func main() throws {
     var libPath: String?
     var repoRoot: String?
     var filesFromPath: String?
+    var projectScopePath: String?
 
     var i = 3
     while i < args.count {
@@ -45,6 +46,9 @@ func main() throws {
         case "--files-from":
             i += 1
             if i < args.count { filesFromPath = args[i] }
+        case "--project-scope":
+            i += 1
+            if i < args.count { projectScopePath = args[i] }
         default:
             break
         }
@@ -60,7 +64,7 @@ func main() throws {
 
     let repoRootSlash: String? = repoRoot.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
 
-    // Load project file set for filtering.
+    // Load project file set for filtering definitions (--files-from).
     var projectFiles: Set<String> = []
     if let filesPath = filesFromPath {
         let content = try String(contentsOfFile: filesPath, encoding: .utf8)
@@ -74,6 +78,25 @@ func main() throws {
                 }
             }
         }
+    }
+
+    // Load broader project scope for filtering references (--project-scope).
+    // Falls back to projectFiles when not provided (full index case).
+    var projectScope: Set<String> = []
+    if let scopePath = projectScopePath {
+        let content = try String(contentsOfFile: scopePath, encoding: .utf8)
+        for line in content.split(separator: "\n") {
+            let rel = String(line)
+            if !rel.isEmpty {
+                projectScope.insert(rel)
+                if let prefix = repoRootSlash {
+                    projectScope.insert(prefix + rel)
+                }
+            }
+        }
+    }
+    if projectScope.isEmpty {
+        projectScope = projectFiles
     }
 
     fputs("Opening index store...\n", stderr)
@@ -143,7 +166,7 @@ func main() throws {
 
             // Skip if not a project file or same file.
             guard refPath != defFile else { return true }
-            if !projectFiles.isEmpty && !projectFiles.contains(refPath) && !projectFiles.contains(occ.location.path) {
+            if !projectScope.isEmpty && !projectScope.contains(refPath) && !projectScope.contains(occ.location.path) {
                 return true
             }
 

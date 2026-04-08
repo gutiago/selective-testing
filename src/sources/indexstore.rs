@@ -116,11 +116,24 @@ fn find_xcode_derived_data(
     None
 }
 
-impl DataSource for IndexStoreSource {
-    fn analyze(
+impl IndexStoreSource {
+    /// Incremental analysis: scan definitions from `changed_files` but allow
+    /// references from any file in `all_project_files`.
+    /// This ensures edges from changed files to unchanged dependents are preserved.
+    pub fn analyze_incremental(
+        &self,
+        repo_root: &Path,
+        changed_files: &[PathBuf],
+        all_project_files: &[PathBuf],
+    ) -> Result<(Vec<FileNode>, Vec<SourceEdge>)> {
+        self.run_helper(repo_root, changed_files, Some(all_project_files))
+    }
+
+    fn run_helper(
         &self,
         repo_root: &Path,
         swift_files: &[PathBuf],
+        project_scope: Option<&[PathBuf]>,
     ) -> Result<(Vec<FileNode>, Vec<SourceEdge>)> {
         info!(
             helper = %self.helper_path.display(),
@@ -128,11 +141,11 @@ impl DataSource for IndexStoreSource {
             "Querying IndexStoreDB via Swift helper"
         );
 
+        let st_dir = repo_root.join(".selective-testing");
+        std::fs::create_dir_all(&st_dir)?;
+
         // Write file list to a temp file for --files-from.
-        let files_list_path = repo_root.join(".selective-testing/file-list.txt");
-        if let Some(parent) = files_list_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let files_list_path = st_dir.join("file-list.txt");
         {
             let mut f = std::fs::File::create(&files_list_path)?;
             for path in swift_files {
@@ -144,21 +157,38 @@ impl DataSource for IndexStoreSource {
             }
         }
 
+        // Write project scope file for --project-scope (incremental only).
+        let scope_list_path = st_dir.join("project-scope.txt");
+        if let Some(scope_files) = project_scope {
+            let mut f = std::fs::File::create(&scope_list_path)?;
+            for path in scope_files {
+                let rel = path
+                    .strip_prefix(repo_root)
+                    .unwrap_or(path)
+                    .to_string_lossy();
+                writeln!(f, "{}", rel)?;
+            }
+        }
+
         // Run the Swift helper.
-        let output = Command::new(&self.helper_path)
-            .arg(&self.store_path)
+        let mut cmd = Command::new(&self.helper_path);
+        cmd.arg(&self.store_path)
             .arg(&self.db_path)
             .arg("--repo-root")
             .arg(repo_root)
             .arg("--files-from")
-            .arg(&files_list_path)
-            .output()
-            .with_context(|| {
-                format!(
-                    "Failed to run index-helper at: {}",
-                    self.helper_path.display()
-                )
-            })?;
+            .arg(&files_list_path);
+
+        if project_scope.is_some() {
+            cmd.arg("--project-scope").arg(&scope_list_path);
+        }
+
+        let output = cmd.output().with_context(|| {
+            format!(
+                "Failed to run index-helper at: {}",
+                self.helper_path.display()
+            )
+        })?;
 
         // Log stderr.
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -174,12 +204,12 @@ impl DataSource for IndexStoreSource {
             );
         }
 
-        // Clean up temp file.
+        // Clean up temp files.
         let _ = std::fs::remove_file(&files_list_path);
+        let _ = std::fs::remove_file(&scope_list_path);
 
         // Parse edge-based JSON output.
         debug!(stdout_bytes = output.stdout.len(), "Parsing helper JSON output");
-        // Trim trailing whitespace/newlines that may confuse the parser.
         let stdout_trimmed = {
             let s = &output.stdout;
             let end = s.iter().rposition(|&b| b == b'}').map(|i| i + 1).unwrap_or(s.len());
@@ -202,8 +232,17 @@ impl DataSource for IndexStoreSource {
             "IndexStoreDB query complete"
         );
 
-        // Convert edges to graph nodes and SourceEdges.
         build_from_edges(&index_output, repo_root, swift_files)
+    }
+}
+
+impl DataSource for IndexStoreSource {
+    fn analyze(
+        &self,
+        repo_root: &Path,
+        swift_files: &[PathBuf],
+    ) -> Result<(Vec<FileNode>, Vec<SourceEdge>)> {
+        self.run_helper(repo_root, swift_files, None)
     }
 }
 
