@@ -211,6 +211,28 @@ impl DependencyGraph {
         }
     }
 
+    /// Remove nodes (and their edges) for the given file IDs.
+    ///
+    /// petgraph's `remove_node` swap-removes, invalidating other indices, so we
+    /// rebuild `file_index` from scratch after all removals.
+    pub fn remove_nodes(&mut self, ids: &[FileId]) {
+        let mut indices: Vec<NodeIndex> = ids
+            .iter()
+            .filter_map(|id| self.file_index.get(id).copied())
+            .collect();
+        if indices.is_empty() {
+            return;
+        }
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+        for idx in indices {
+            self.graph.remove_node(idx);
+        }
+        self.file_index.clear();
+        for idx in self.graph.node_indices() {
+            self.file_index.insert(self.graph[idx].id.clone(), idx);
+        }
+    }
+
     /// Remove all edges of a given kind from the entire graph.
     ///
     /// Indices are removed in descending order to avoid petgraph's swap-remove
@@ -284,6 +306,32 @@ mod tests {
             remaining
         );
         assert_eq!(remaining.len(), 3, "3 DirectReference edges should survive");
+    }
+
+    #[test]
+    fn remove_nodes_drops_edges_and_reindexes() {
+        let mut g = DependencyGraph::new(PathBuf::from("/repo"));
+        g.ensure_node(make_node("A"));
+        g.ensure_node(make_node("B"));
+        g.ensure_node(make_node("C"));
+        g.ensure_node(make_node("D"));
+
+        g.add_edge(&"A".into(), &"B".into(), EdgeKind::DirectReference);
+        g.add_edge(&"B".into(), &"C".into(), EdgeKind::DirectReference);
+        g.add_edge(&"C".into(), &"D".into(), EdgeKind::DirectReference);
+
+        // Remove B — should drop A→B and B→C, leaving only C→D.
+        g.remove_nodes(&["B".into()]);
+
+        assert_eq!(g.graph.node_count(), 3);
+        assert_eq!(g.graph.edge_count(), 1);
+        assert!(!g.file_index.contains_key("B"));
+
+        // file_index must still resolve surviving nodes correctly after swap-remove.
+        for id in ["A", "C", "D"] {
+            let idx = g.file_index[id];
+            assert_eq!(g.graph[idx].id, id);
+        }
     }
 
     #[test]

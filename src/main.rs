@@ -117,6 +117,29 @@ fn find_changed_files(
     changed
 }
 
+/// IDs in the cached graph that are no longer present on disk (deleted or renamed away).
+fn find_deleted_files(
+    cached: &graph::model::DependencyGraph,
+    swift_files: &[PathBuf],
+    repo_root: &Path,
+) -> Vec<String> {
+    let on_disk: std::collections::HashSet<String> = swift_files
+        .iter()
+        .map(|p| {
+            p.strip_prefix(repo_root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    cached
+        .file_index
+        .keys()
+        .filter(|id| !on_disk.contains(id.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// Discover .swift files using git index (fast) with walkdir fallback.
 fn discover_swift_files(repo_root: &Path) -> Vec<PathBuf> {
     match diff::git::tracked_swift_files(repo_root) {
@@ -169,11 +192,26 @@ fn cmd_index(
     if !force {
         if let Some(mut cached_graph) = graph::cache::load(&repo_root)? {
             let changed = find_changed_files(&cached_graph, &swift_files, &repo_root, &blob_shas);
-            if changed.is_empty() {
+            let deleted = find_deleted_files(&cached_graph, &swift_files, &repo_root);
+            if !deleted.is_empty() {
+                info!(count = deleted.len(), "Pruning deleted/renamed files from graph");
+                cached_graph.remove_nodes(&deleted);
+            }
+            if changed.is_empty() && deleted.is_empty() {
                 info!(
                     files = cached_graph.metadata.file_count,
                     edges = cached_graph.metadata.edge_count,
                     "Graph is up to date"
+                );
+                return Ok(());
+            }
+            if changed.is_empty() {
+                // Only deletions — persist the pruned graph and return.
+                cached_graph.update_metadata();
+                graph::cache::save(&cached_graph, &repo_root)?;
+                eprintln!(
+                    "Pruned {} files (incremental, deletions only)",
+                    deleted.len(),
                 );
                 return Ok(());
             }
